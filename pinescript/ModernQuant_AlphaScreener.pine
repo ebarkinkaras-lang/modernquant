@@ -1,0 +1,228 @@
+//@version=6
+indicator("ModernQuant v2.0 - Asymmetric Alpha & Radar-Altı Screener (v6)", shorttitle="ModernQuant v6 Screener", overlay=true, scale=scale.right, max_labels_count=500)
+
+// =============================================================================
+// MODERNQUANT SUITE v2.0 - PINE SCRIPT v6 (LATEST TRADINGVIEW STANDARD)
+// C++ QuantOpportunityScanner (alpha_screener.hpp) v6 Pine Portu
+// Gelişmiş Type Safety, v6 Enum Yapısı, Volatilite Sıkışması ve Asimetrik R:R
+// =============================================================================
+
+// --- PINE v6 ENUM TANIMLARI ---
+enum AlphaCategory
+    Hidden
+    Squeeze
+    EarlyMomentum
+    CrowdedTrade
+
+enum TablePosition
+    TopRight
+    BottomRight
+    TopLeft
+    BottomLeft
+
+// --- AYARLAR & GİRDİLER (PINE v6 INPUTS) ---
+grp_calc   = "Quant Hesaplama Parametreleri"
+len_vwap   = input.int(22, "Rolling VWAP / Hacim Periyodu (Gün)", minval=5, group=grp_calc)
+len_rsi    = input.int(14, "RSI Periyodu", minval=2, group=grp_calc)
+len_atr    = input.int(14, "ATR Oynaklık Periyodu", minval=2, group=grp_calc)
+sq_thresh  = input.float(0.68, "Volatilite Sıkışma Eşiği (σ5 / σ20)", step=0.01, group=grp_calc)
+crowd_hi   = input.float(62.0, "Aşırı Kalabalık / Sürü Eşiği (%)", step=1.0, group=grp_calc)
+
+grp_visual = "Grafik & Görselleştirme Ayarları"
+show_table = input.bool(true, "Çoklu Varlık Tarayıcı Tablosunu Göster (Screener)", group=grp_visual)
+tbl_pos    = input.enum(TablePosition.TopRight, "Tablo Konumu", group=grp_visual)
+color_bars = input.bool(true, "Mumları Quant Sınıfına Göre Renklendir", group=grp_visual)
+show_lines = input.bool(true, "Asimetrik Hedef ve Stop Seviyelerini Çiz", group=grp_visual)
+
+grp_univ   = "Çoklu Hisse Tarama Havuzu (Screener Universe)"
+s01 = input.symbol("BIST:THYAO", "Hisse 01", group=grp_univ)
+s02 = input.symbol("BIST:ASELS", "Hisse 02", group=grp_univ)
+s03 = input.symbol("BIST:EREGL", "Hisse 03", group=grp_univ)
+s04 = input.symbol("BIST:TUPRS", "Hisse 04", group=grp_univ)
+s05 = input.symbol("BIST:BIMAS", "Hisse 05", group=grp_univ)
+s06 = input.symbol("BIST:CCOLA", "Hisse 06", group=grp_univ)
+s07 = input.symbol("BIST:KCHOL", "Hisse 07", group=grp_univ)
+s08 = input.symbol("BIST:SAHOL", "Hisse 08", group=grp_univ)
+s09 = input.symbol("BIST:SISE",  "Hisse 09", group=grp_univ)
+s10 = input.symbol("BIST:PGSUS", "Hisse 10", group=grp_univ)
+
+// =============================================================================
+// FONKSİYON: TEK BİR VARLIK İÇİN QUANT HESAPLAMALARI (PINE v6)
+// =============================================================================
+f_calc_quant(series float _close, series float _high, series float _low, series float _volume) =>
+    // 1. 22 İş Günü (30 Takvim Günü) Getirisi
+    float _ret30 = (_close - _close[22]) / _close[22] * 100.0
+
+    // 2. 14-Periyotluk RSI
+    float _rsi = ta.rsi(_close, len_rsi)
+
+    // 3. 22-Günlük Rolling VWAP & Standardize Z-Score
+    float _sumPV = math.sum(_close * _volume, len_vwap)
+    float _sumV  = math.sum(_volume, len_vwap)
+    float _sma_fallback = ta.sma(_close, len_vwap)
+    float _vwap  = _sumV > 0.0 ? _sumPV / _sumV : _sma_fallback
+    float _vwap_dist = ((_close - _vwap) / _vwap) * 100.0
+    float _p_std = ta.stdev(_close, len_vwap)
+    float _vwap_z = _p_std > 0.0001 ? (_close - _vwap) / _p_std : 0.0
+
+    // 4. Volatilite Sıkışması: sigma_5 / sigma_20
+    float _log_ret = math.log(_close / _close[1])
+    float _std5  = ta.stdev(_log_ret, 5)
+    float _std20 = ta.stdev(_log_ret, 20)
+    float _squeeze_ratio = _std20 > 0.0001 ? _std5 / _std20 : 1.0
+
+    // 5. Kurumsal Hacim Akışı (On-Balance Volume Skew - 15 Bar)
+    float _up_v   = math.sum(_close > _close[1] ? _volume : 0.0, 15)
+    float _down_v = math.sum(_close < _close[1] ? _volume : 0.0, 15)
+    float _tot_v  = _up_v + _down_v
+    float _flow   = _tot_v > 0.0 ? (_up_v - _down_v) / _tot_v : 0.0
+
+    // 6. Kalabalık Skoru (%0.0 ile %100.0)
+    float _f_ret  = math.max(0.0, math.min(1.0, (_ret30 - 3.0) / 32.0))
+    float _f_rsi  = math.max(0.0, math.min(1.0, (_rsi - 55.0) / 25.0))
+    float _f_vwap = math.max(0.0, math.min(1.0, (_vwap_dist - 1.5) / 16.0))
+    float _crowd  = (0.40 * _f_ret + 0.35 * _f_rsi + 0.25 * _f_vwap) * 100.0
+
+    // 7. Sınıflandırma
+    bool _is_crowded = _crowd >= crowd_hi or (_rsi >= 72.0 and _ret30 >= 28.0) or _vwap_dist >= 14.0 or (_flow < -0.12 and _ret30 < -3.0)
+    bool _is_squeeze = _squeeze_ratio <= sq_thresh and _crowd < 55.0 and _flow >= -0.05
+    bool _is_hidden  = _flow >= 0.08 and _crowd < 45.0
+
+    int _cat_code = 2 // 0: Hidden, 1: Squeeze, 2: EarlyMomentum, 3: Crowded
+    if _is_crowded
+        _cat_code := 3
+    else if _is_squeeze
+        _cat_code := 1
+    else if _is_hidden
+        _cat_code := 0
+    else
+        _cat_code := 2
+
+    // 8. ATR ve Asimetrik Risk / Kazanç (R:R)
+    float _atr = ta.atr(len_atr)
+    float _stop   = _is_crowded ? _close * 0.86 : _close - (_atr * 1.15)
+    float _target = _is_crowded ? _close * 1.05 : _close + (_atr * 4.20)
+    float _risk   = math.max(0.1, ((_close - _stop) / _close) * 100.0)
+    float _reward = math.max(0.1, ((_target - _close) / _close) * 100.0)
+    float _rr     = _reward / _risk
+
+    [_close, _vwap, _squeeze_ratio, _crowd, _cat_code, _stop, _target, _rr]
+
+// Aktif Grafik Değerleri
+[cur_p, cur_vwap, cur_sq, cur_crowd, cur_cat_code, cur_stop, cur_target, cur_rr] = f_calc_quant(close, high, low, volume)
+
+// =============================================================================
+// GRAFİK GÖRSELLEŞTİRME (C++ 80s QUANT TERMINAL RENKLERI)
+// =============================================================================
+color col_cat = switch cur_cat_code
+    0 => color.new(#00e5ff, 0) // Cyan: 💎 Gizli Alfa
+    1 => color.new(#ffb300, 0) // Amber: ⚡ Sıkışma
+    3 => color.new(#ff1744, 0) // Red: ⚠️ Sürü Tuzağı
+    => color.new(#00e676, 0)   // Green: 📈 Momentum
+
+// Mum Gövde Boyama
+barcolor(color_bars ? col_cat : na)
+
+// 30-Günlük Kurumsal VWAP
+plot(cur_vwap, "30-Günlük Kurumsal VWAP", color=color.new(#9e9e9e, 25), linewidth=2)
+
+// Asimetrik Hedef ve Kesin Stop Seviyeleri
+p_target = plot(show_lines ? cur_target : na, "Asimetrik Hedef Fiyat (+3.5σ)", color=color.new(#00e676, 20), style=plot.style_circles)
+p_stop   = plot(show_lines ? cur_stop : na, "Zarar Kes / Destek (Stop)", color=color.new(#ff1744, 20), style=plot.style_circles)
+fill(p_target, p_stop, color=color.new(col_cat, 93), title="Asimetrik Bant")
+
+// =============================================================================
+// PINE v6 SİNYAL ETİKETLERİ & ALARMLAR (MUMA FİZİKSEL KİLİTLİ)
+// =============================================================================
+bool sig_hidden  = (cur_cat_code == 0) and (cur_cat_code[1] != 0)
+bool sig_squeeze = (cur_cat_code == 1) and (cur_cat_code[1] != 1)
+bool sig_crowded = (cur_cat_code == 3) and (cur_cat_code[1] != 3)
+
+// yloc.belowbar ve yloc.abovebar etiketleri doğrudan ilgili muma kilitler.
+// Grafik kaydırıldığında, yakınlaştırıldığında veya ölçek hareket ettiğinde etiketler mumdan kopmaz.
+if sig_hidden and (barstate.isconfirmed or barstate.ishistory)
+    label.new(bar_index, na, "💎 GİZLİ ALFA\nR:R 1:" + str.tostring(cur_rr, "#.#"),
+              yloc=yloc.belowbar, color=color.new(#00e5ff, 15), textcolor=color.black, style=label.style_label_up, size=size.small)
+
+if sig_squeeze and (barstate.isconfirmed or barstate.ishistory)
+    label.new(bar_index, na, "⚡ SIKIŞMA (YAY)\nσ:" + str.tostring(cur_sq, "#.##"),
+              yloc=yloc.belowbar, color=color.new(#ffb300, 15), textcolor=color.black, style=label.style_label_up, size=size.small)
+
+if sig_crowded and (barstate.isconfirmed or barstate.ishistory)
+    label.new(bar_index, na, "⚠️ SÜRÜ TUZAĞI!\nAşırı Şişmiş",
+              yloc=yloc.abovebar, color=color.new(#ff1744, 15), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+alertcondition(sig_hidden, "Gizli Alfa Sinyali", "ModernQuant: 💎 Gizli Akümülasyon (Yüksek Asimetri) tespit edildi!")
+alertcondition(sig_squeeze, "Volatilite Sıkışması", "ModernQuant: ⚡ Volatilite Sıkışması (Patlama Adayı) tespit edildi!")
+alertcondition(sig_crowded, "Sürü Tuzağı Uyarısı", "ModernQuant: ⚠️ Aşırı Şişmiş Sürü Hissesi (Zirveden Almayın)!")
+
+// =============================================================================
+// ÇOKLU HİSSE SCREENER TABLOSU (PINE v6 DASHBOARD)
+// =============================================================================
+var table_pos_v6 = switch tbl_pos
+    TablePosition.TopRight    => position.top_right
+    TablePosition.BottomRight => position.bottom_right
+    TablePosition.TopLeft     => position.top_left
+    TablePosition.BottomLeft  => position.bottom_left
+
+var table dash = table.new(table_pos_v6, 6, 12,
+                           bgcolor=color.new(#111318, 10),
+                           border_color=color.new(#2e323b, 40),
+                           border_width=1,
+                           frame_color=color.new(#424242, 30),
+                           frame_width=2)
+
+f_add_row(table tbl, int row, string sym, float p, float sq, float crowd, int cat_code, float rr) =>
+    string cat_str = switch cat_code
+        0 => "💎 GİZLİ ALFA"
+        1 => "⚡ SIKIŞMA"
+        3 => "⚠️ SÜRÜ"
+        => "📈 MOMENTUM"
+
+    color cat_col = switch cat_code
+        0 => #00e5ff
+        1 => #ffb300
+        3 => #ff1744
+        => #00e676
+
+    string rr_str = "1 : " + str.tostring(rr, "#.#")
+    color rr_col  = rr >= 3.0 ? #00e676 : (rr < 1.0 ? #ff1744 : #ffb300)
+
+    table.cell(tbl, 0, row, sym, text_color=color.white, text_size=size.small)
+    table.cell(tbl, 1, row, str.tostring(p, "#.##"), text_color=color.white, text_size=size.small)
+    table.cell(tbl, 2, row, cat_str, text_color=cat_col, text_size=size.small)
+    table.cell(tbl, 3, row, str.tostring(sq, "#.##"), text_color=(sq < 0.70 ? #ffb300 : color.gray), text_size=size.small)
+    table.cell(tbl, 4, row, "%" + str.tostring(crowd, "#"), text_color=(crowd >= 60.0 ? #ff1744 : color.gray), text_size=size.small)
+    table.cell(tbl, 5, row, rr_str, text_color=rr_col, text_size=size.small)
+
+// Çoklu Varlık Verilerini request.security ile Çek (CW10004 uyarısını önlemek için global scope'ta hesaplanır)
+[p01, v01, sq01, cr01, c01, st01, tg01, rr01] = request.security(s01, timeframe.period, f_calc_quant(close, high, low, volume))
+[p02, v02, sq02, cr02, c02, st02, tg02, rr02] = request.security(s02, timeframe.period, f_calc_quant(close, high, low, volume))
+[p03, v03, sq03, cr03, c03, st03, tg03, rr03] = request.security(s03, timeframe.period, f_calc_quant(close, high, low, volume))
+[p04, v04, sq04, cr04, c04, st04, tg04, rr04] = request.security(s04, timeframe.period, f_calc_quant(close, high, low, volume))
+[p05, v05, sq05, cr05, c05, st05, tg05, rr05] = request.security(s05, timeframe.period, f_calc_quant(close, high, low, volume))
+[p06, v06, sq06, cr06, c06, st06, tg06, rr06] = request.security(s06, timeframe.period, f_calc_quant(close, high, low, volume))
+[p07, v07, sq07, cr07, c07, st07, tg07, rr07] = request.security(s07, timeframe.period, f_calc_quant(close, high, low, volume))
+[p08, v08, sq08, cr08, c08, st08, tg08, rr08] = request.security(s08, timeframe.period, f_calc_quant(close, high, low, volume))
+[p09, v09, sq09, cr09, c09, st09, tg09, rr09] = request.security(s09, timeframe.period, f_calc_quant(close, high, low, volume))
+[p10, v10, sq10, cr10, c10, st10, tg10, rr10] = request.security(s10, timeframe.period, f_calc_quant(close, high, low, volume))
+
+if barstate.islast and show_table
+    // 1980s Quant Terminal Başlıkları
+    table.cell(dash, 0, 0, "SEMBOL", bgcolor=color.new(#21252d, 0), text_color=#ffb300, text_size=size.small)
+    table.cell(dash, 1, 0, "FİYAT", bgcolor=color.new(#21252d, 0), text_color=#ffb300, text_size=size.small)
+    table.cell(dash, 2, 0, "QUANT SINIFI", bgcolor=color.new(#21252d, 0), text_color=#ffb300, text_size=size.small)
+    table.cell(dash, 3, 0, "SIKIŞMA", bgcolor=color.new(#21252d, 0), text_color=#ffb300, text_size=size.small)
+    table.cell(dash, 4, 0, "SÜRÜ %", bgcolor=color.new(#21252d, 0), text_color=#ffb300, text_size=size.small)
+    table.cell(dash, 5, 0, "R:R ASİMETRİ", bgcolor=color.new(#21252d, 0), text_color=#ffb300, text_size=size.small)
+
+    f_add_row(dash, 1,  str.replace_all(s01, "BIST:", ""), p01, sq01, cr01, c01, rr01)
+    f_add_row(dash, 2,  str.replace_all(s02, "BIST:", ""), p02, sq02, cr02, c02, rr02)
+    f_add_row(dash, 3,  str.replace_all(s03, "BIST:", ""), p03, sq03, cr03, c03, rr03)
+    f_add_row(dash, 4,  str.replace_all(s04, "BIST:", ""), p04, sq04, cr04, c04, rr04)
+    f_add_row(dash, 5,  str.replace_all(s05, "BIST:", ""), p05, sq05, cr05, c05, rr05)
+    f_add_row(dash, 6,  str.replace_all(s06, "BIST:", ""), p06, sq06, cr06, c06, rr06)
+    f_add_row(dash, 7,  str.replace_all(s07, "BIST:", ""), p07, sq07, cr07, c07, rr07)
+    f_add_row(dash, 8,  str.replace_all(s08, "BIST:", ""), p08, sq08, cr08, c08, rr08)
+    f_add_row(dash, 9,  str.replace_all(s09, "BIST:", ""), p09, sq09, cr09, c09, rr09)
+    f_add_row(dash, 10, str.replace_all(s10, "BIST:", ""), p10, sq10, cr10, c10, rr10)

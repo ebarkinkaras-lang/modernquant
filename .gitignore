@@ -1,0 +1,60 @@
+# ==============================================================================
+# ModernQuantSuite - Git Ignore Configuration
+# ==============================================================================
+
+# Compiled Binaries & Directories
+bin/
+build/
+obj/
+out/
+target/
+
+# Object & Library files
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Debugging Symbols & Profiling
+*.dSYM/
+*.pdb
+*.su
+*.idb
+*.gch
+*.gcda
+*.gcno
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE & Editor Files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+compile_commands.json
+.clangd/
+
+# CMake Generated Files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.cmake
+install_manifest.txt
+
+# Log & Temp Files
+*.log
+*.tmp
+*.bak
