@@ -38,6 +38,7 @@ endif
 
 CXXFLAGS := $(MAC_FLAGS) \
             -std=c++20 \
+            -DBOOST_JSON_NO_LIB \
             -D_LIBCPP_ENABLE_CXX17_REMOVED_UNARY_BINARY_FUNCTION \
             -Wno-deprecated-declarations \
             -Wno-deprecated-builtins \

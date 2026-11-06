@@ -58,3 +58,6 @@ install_manifest.txt
 *.log
 *.tmp
 *.bak
+
+# Local Dependency Caches
+deps/

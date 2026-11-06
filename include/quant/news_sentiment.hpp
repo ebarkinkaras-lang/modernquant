@@ -1,11 +1,15 @@
 #pragma once
 
 #include "live_market_data.hpp"
+#include "i18n.hpp"
 #include <string>
+#include <string_view>
 #include <vector>
+#include <unordered_set>
 #include <sstream>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <format>
 
 namespace quant {
@@ -14,6 +18,8 @@ struct NewsHeadlineItem {
     std::string title;
     std::string publisher;
     double polarity_score{0.0}; // -1.0 to +1.0
+    int64_t publish_time{0};
+    double recency_weight{1.0};
 };
 
 struct MacroEconomicNews {
@@ -26,7 +32,9 @@ struct MacroEconomicNews {
 struct AssetSentimentProfile {
     std::string ticker;
     std::string company_name;
-    double sentiment_score{0.0}; // -1.00 to +1.00
+    double sentiment_score{0.0}; // -1.00 to +1.00 (0.00 when no live news)
+    bool has_live_news{false};
+    int live_headline_count{0};
     std::string sentiment_label;
     std::string sentiment_bar;
     std::string macro_catalyst;
@@ -41,80 +49,223 @@ struct RegionalMacroSentiment {
     std::string overall_gauge_bar;
     std::vector<MacroEconomicNews> macro_developments;
     std::string macro_synthesis;
+
+    // Live quantitative regime telemetry
+    bool is_crisis_regime{false};
+    double benchmark_spot{0.0};
+    double benchmark_return_20d_pct{0.0};
+    double benchmark_volatility_pct{0.0};
 };
 
 class NewsSentimentEngine {
 public:
-    // Lexicon-based financial NLP sentiment scoring (Turkish & English) with shock-weighting
+    // UTF-8 aware lowercasing for Turkish, German, and English financial text
+    static std::string utf8_to_lower(std::string_view text) {
+        std::string out;
+        out.reserve(text.size() + 8);
+        for (size_t i = 0; i < text.size(); ++i) {
+            unsigned char c = static_cast<unsigned char>(text[i]);
+            if (c >= 'A' && c <= 'Z') {
+                out.push_back(static_cast<char>(c - 'A' + 'a'));
+                continue;
+            }
+            if (i + 1 < text.size()) {
+                unsigned char n = static_cast<unsigned char>(text[i + 1]);
+                if (c == 0xC4 && n == 0xB0) { out += "i"; ++i; continue; }          // İ -> i
+                if (c == 0xC4 && n == 0x9E) { out += "\xC4\x9F"; ++i; continue; }   // Ğ -> ğ
+                if (c == 0xC5 && n == 0x9E) { out += "\xC5\x9F"; ++i; continue; }   // Ş -> ş
+                if (c == 0xC3 && n == 0x87) { out += "\xC3\xA7"; ++i; continue; }   // Ç -> ç
+                if (c == 0xC3 && n == 0x96) { out += "\xC3\xB6"; ++i; continue; }   // Ö -> ö
+                if (c == 0xC3 && n == 0x9C) { out += "\xC3\xBC"; ++i; continue; }   // Ü -> ü
+                if (c == 0xC3 && n == 0x84) { out += "\xC3\xA4"; ++i; continue; }   // Ä -> ä
+                if (c == 0xC3 && n == 0x82) { out += "\xC3\xA2"; ++i; continue; }   // Â -> â
+            }
+            // Split UTF-8 general punctuation sequences (e.g. ’, “, ”, –, —) into spaces
+            if (c == 0xE2 && i + 2 < text.size() && static_cast<unsigned char>(text[i + 1]) == 0x80) {
+                out.push_back(' ');
+                i += 2;
+                continue;
+            }
+            out.push_back(static_cast<char>(c));
+        }
+        return out;
+    }
+
+    // Word-boundary tokenizer preventing substring false positives ("rise" in "enterprise", "gain" in "against")
+    static std::vector<std::string> tokenize_words(std::string_view lower_text) {
+        std::vector<std::string> tokens;
+        std::string cur;
+        for (size_t i = 0; i < lower_text.size(); ++i) {
+            unsigned char c = static_cast<unsigned char>(lower_text[i]);
+            bool is_word_byte = (c >= 'a' && c <= 'z') ||
+                                (c >= '0' && c <= '9') ||
+                                (c >= 0x80);
+            if (is_word_byte) {
+                cur.push_back(static_cast<char>(c));
+            } else {
+                if (!cur.empty()) {
+                    tokens.push_back(std::move(cur));
+                    cur.clear();
+                }
+            }
+        }
+        if (!cur.empty()) {
+            tokens.push_back(std::move(cur));
+        }
+        return tokens;
+    }
+
+    // Word-boundary & negation-aware financial NLP sentiment scoring (Turkish, English & German)
     static double score_headline(const std::string& text) {
-        std::string lower = text;
-        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        if (text.empty()) return 0.0;
+        std::string lower = utf8_to_lower(text);
+        std::vector<std::string> tokens = tokenize_words(lower);
+        if (tokens.empty()) return 0.0;
 
-        // High-severity systemic shock terms (weight 3.5)
-        static const std::vector<std::string> severe_shock_lexicon = {
-            "msci", "çakılma", "çakıldı", "çöküş", "çöktü", "statü uyarısı", "statü riski",
-            "küme düşme", "gelişmekte olan ülke", "frontier", "öncü pazar", "panik",
-            "panik satışı", "taban", "devre kesici", "sermaye kaçışı", "yabancı çıkışı",
-            "likidite krizi", "not indirimi", "capital flight", "crash", "selloff",
-            "market plunge", "margin call", "tasfiye", "düşürme"
+        static const std::unordered_set<std::string> severe_negative_words = {
+            // Turkish severe market / corporate stress
+            "çakılma", "çakıldı", "çöküş", "çöktü", "panik", "iflas", "konkordato",
+            "temerrüt", "tasfiye", "soruşturma",
+            // English severe shock
+            "crash", "crashes", "crashed", "plunge", "plunges", "plunged",
+            "selloff", "bankruptcy", "bankrupt", "default", "defaults", "liquidation",
+            "collapse", "collapses", "collapsed", "fraud",
+            // German severe shock
+            "einbruch", "absturz", "insolvenz", "panikverkäufe"
         };
 
-        static const std::vector<std::string> positive_lexicon = {
-            "rekor", "büyüme", "kâr", "sipariş", "ihracat", "artış", "yükseliş", "anlaşma",
-            "temettü", "tavsiye", "not artırımı", "yatırım", "zirve", "kazanç", "lider",
-            "başarı", "ihale", "alım", "onay", "fırsat", "güçlü",
-            "rally", "surge", "upgrade", "beat", "gain", "boost", "growth", "bull",
-            "profit", "record", "partnership", "acquisition", "strong", "rise", "outperform",
-            "contract", "dividend", "expand", "robust"
+        static const std::unordered_set<std::string> severe_negative_bigrams = {
+            "statü uyarısı", "küme düşme", "panik satışı", "devre kesici", "devre kesti",
+            "sermaye kaçışı", "likidite krizi", "not indirimi", "taban oldu",
+            "capital flight", "margin call", "circuit breaker", "credit downgrade", "profit warning"
         };
 
-        static const std::vector<std::string> negative_lexicon = {
-            "düşüş", "zarar", "kayıp", "baskı", "risk", "gerileme", "kriz", "ceza",
-            "enflasyonist", "satış", "durgunluk", "resesyon", "savaş", "tehdit", "iptal",
-            "jeopolitik gerilim", "borç", "daralma", "zayıf", "endişe", "uyarı",
-            "plunge", "slump", "drop", "loss", "fall", "downgrade", "bear", "miss",
-            "warning", "inflation", "slowdown", "threat", "concern", "tensions", "weak",
-            "debt", "cut", "recession", "strike"
+        static const std::unordered_set<std::string> positive_words = {
+            // Turkish bullish / strong fundamentals
+            "rekor", "büyüme", "büyüdü", "kâr", "sipariş", "ihracat", "artış", "artiş", "arttı",
+            "yükseliş", "yükseldi", "ralli", "temettü", "yatırım", "zirve", "kazanç",
+            "başarı", "ihale", "onay", "güçlü", "beklentiyi", "aştı", "tavan",
+            // English whole-word tokens (inflections explicitly enumerated so substrings never match)
+            "rally", "rallies", "rallied", "surge", "surges", "surged", "soar", "soars", "soared",
+            "jump", "jumps", "jumped", "climb", "climbs", "climbed",
+            "upgrade", "upgrades", "upgraded", "beat", "beats", "beating",
+            "gain", "gains", "gained", "boost", "boosts", "boosted",
+            "growth", "bullish", "profit", "profits", "profitable", "record", "records",
+            "outperform", "outperforms", "outperformed", "strong", "stronger", "strongest",
+            "rise", "rises", "rose", "rising", "dividend", "dividends", "expand", "expands", "expanded",
+            "robust", "breakthrough", "buyback", "optimism", "upbeat", "recovery", "rebound", "rebounds",
+            // German positive
+            "rekord", "wachstum", "gewinn", "dividende", "anstieg", "aufwärtstrend", "stark"
+        };
+
+        static const std::unordered_set<std::string> positive_bigrams = {
+            "not artırımı", "net kar", "net kâr", "hedef yükseltti", "alım tavsiyesi",
+            "rate cut", "soft landing", "raises guidance", "raised guidance", "beats estimates",
+            "beat estimates", "share buyback", "alltime high", "record high"
+        };
+
+        static const std::unordered_set<std::string> negative_words = {
+            // Turkish bearish / risk
+            "düşüş", "dusus", "düştü", "zarar", "kayıp", "baskı", "gerileme", "geriledi",
+            "kriz", "ceza", "resesyon", "daralma", "daraldı", "zayıf", "endişe", "uyarı",
+            "iptal", "açık", "enflasyonist",
+            // English whole-word tokens
+            "slump", "slumps", "slumped", "drop", "drops", "dropped", "tumble", "tumbles", "tumbled",
+            "loss", "losses", "fall", "falls", "fell", "falling", "slide", "slides", "slid",
+            "downgrade", "downgrades", "downgraded", "bearish", "miss", "misses", "missed",
+            "warning", "warnings", "slowdown", "recession", "weak", "weaker", "weakness",
+            "deficit", "lawsuit", "probe", "tariffs", "layoffs", "headwinds", "decline", "declines", "declined",
+            // German negative
+            "verlust", "rückgang", "krise", "rezession", "warnung", "schwach", "abwertung"
+        };
+
+        static const std::unordered_set<std::string> negative_bigrams = {
+            "satış baskısı", "hedef düşürdü", "zarar açıkladı", "yabancı çıkışı", "jeopolitik gerilim",
+            "cuts guidance", "cut guidance", "lowered guidance", "lowers guidance",
+            "misses estimates", "missed estimates", "rate hike", "trade war"
+        };
+
+        static const std::unordered_set<std::string> pre_negations = {
+            "no", "not", "without", "never", "neither", "avoid", "avoids", "avoided", "less", "kein", "keine"
+        };
+
+        static const std::unordered_set<std::string> post_negations_tr = {
+            "değil", "degil", "yok", "olmadı", "olmadi", "beklenmiyor", "görülmedi"
+        };
+
+        auto is_negated = [&](size_t idx, size_t span_len) -> bool {
+            if (idx >= 1 && pre_negations.contains(tokens[idx - 1])) return true;
+            if (idx >= 2 && pre_negations.contains(tokens[idx - 2])) return true;
+            if (idx + span_len < tokens.size() && post_negations_tr.contains(tokens[idx + span_len])) return true;
+            return false;
         };
 
         double pos_score = 0.0;
         double neg_score = 0.0;
 
-        for (const auto& w : severe_shock_lexicon) {
-            if (lower.find(w) != std::string::npos) neg_score += 3.5;
-        }
-        for (const auto& w : negative_lexicon) {
-            if (lower.find(w) != std::string::npos) neg_score += 1.5;
-        }
-        for (const auto& w : positive_lexicon) {
-            if (lower.find(w) != std::string::npos) pos_score += 1.0;
+        // 1. Score Bigrams first and mark consumed indices so single words aren't double-counted
+        std::vector<bool> consumed(tokens.size(), false);
+        for (size_t i = 0; i + 1 < tokens.size(); ++i) {
+            std::string bg = tokens[i] + " " + tokens[i + 1];
+            bool neg = is_negated(i, 2);
+            if (severe_negative_bigrams.contains(bg)) {
+                if (neg) pos_score += 1.0;
+                else neg_score += 3.0;
+                consumed[i] = consumed[i + 1] = true;
+            } else if (positive_bigrams.contains(bg)) {
+                if (neg) neg_score += 1.2;
+                else pos_score += 1.8;
+                consumed[i] = consumed[i + 1] = true;
+            } else if (negative_bigrams.contains(bg)) {
+                if (neg) pos_score += 0.8;
+                else neg_score += 1.8;
+                consumed[i] = consumed[i + 1] = true;
+            }
         }
 
-        if (pos_score == 0.0 && neg_score == 0.0) return 0.0; // Strictly neutral
+        // 2. Score Unigrams on unconsumed tokens
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (consumed[i]) continue;
+            const std::string& w = tokens[i];
+            bool neg = is_negated(i, 1);
 
-        double raw = (pos_score - neg_score) / (pos_score + neg_score);
+            if (severe_negative_words.contains(w)) {
+                if (neg) pos_score += 0.8;
+                else neg_score += 2.8;
+            } else if (negative_words.contains(w)) {
+                if (neg) pos_score += 0.6;
+                else neg_score += 1.35;
+            } else if (positive_words.contains(w)) {
+                if (neg) neg_score += 1.0;
+                else pos_score += 1.15;
+            }
+        }
+
+        if (pos_score == 0.0 && neg_score == 0.0) {
+            return 0.0; // Strictly neutral when no financial polarity words appear
+        }
+
+        // Dampen single-word headlines slightly so 1 mild word isn't +-1.00
+        double raw = (pos_score - neg_score) / (pos_score + neg_score + 0.65);
         return std::clamp(raw, -1.0, 1.0);
     }
 
-    // Formats a visual 80s CRT sentiment polarity gauge: [───████┼──────] or [──────┼████──]
+    // Visual 80s CRT sentiment polarity gauge: [───████┼──────] or [──────┼████──]
     static std::string format_sentiment_bar(double score, int half_width = 6) {
         int fill = std::clamp(static_cast<int>(std::round(std::abs(score) * half_width)), 0, half_width);
         std::string bar = "[";
 
         if (score < -0.05) {
-            // Negative: fill left of center
             for (int i = 0; i < half_width - fill; ++i) bar += "─";
             for (int i = 0; i < fill; ++i) bar += "█";
             bar += "┼";
             for (int i = 0; i < half_width; ++i) bar += "─";
         } else if (score > 0.05) {
-            // Positive: fill right of center
             for (int i = 0; i < half_width; ++i) bar += "─";
             bar += "┼";
             for (int i = 0; i < fill; ++i) bar += "█";
             for (int i = 0; i < half_width - fill; ++i) bar += "─";
         } else {
-            // Neutral
             for (int i = 0; i < half_width; ++i) bar += "─";
             bar += "┼";
             for (int i = 0; i < half_width; ++i) bar += "─";
@@ -124,348 +275,476 @@ public:
         return bar;
     }
 
-    static std::string format_sentiment_label(double score) {
-        if (score >= 0.50) return std::format("GÜÇLÜ BOĞA (+{:.2f})", score);
-        if (score >= 0.15) return std::format("ILIMLI POZİTİF (+{:.2f})", score);
-        if (score > -0.15) return std::format("NÖTR / DENGELİ ({:.2f})", score);
-        if (score > -0.50) return std::format("TEMKİNLİ NEGATİF ({:.2f})", score);
-        return std::format("GÜÇLÜ AYI / KRİZ ŞOKU ({:.2f})", score);
+    static std::string format_sentiment_label(double score, bool has_news = true) {
+        if (!has_news) {
+            return I18n::tr("HABER AKIŞI YOK / NÖTR (0.00)",
+                            "NO LIVE NEWS / NEUTRAL (0.00)",
+                            "KEINE LIVE-NEWS / NEUTRAL (0.00)");
+        }
+        if (score >= 0.45) {
+            return I18n::tr(std::format("GÜÇLÜ BOĞA ({:+.2f})", score),
+                            std::format("STRONG BULLISH ({:+.2f})", score),
+                            std::format("STARK BULLISCH ({:+.2f})", score));
+        }
+        if (score >= 0.12) {
+            return I18n::tr(std::format("ILIMLI POZİTİF ({:+.2f})", score),
+                            std::format("MODERATELY POSITIVE ({:+.2f})", score),
+                            std::format("MODERAT POSITIV ({:+.2f})", score));
+        }
+        if (score > -0.12) {
+            return I18n::tr(std::format("NÖTR / DENGELİ ({:+.2f})", score),
+                            std::format("NEUTRAL / BALANCED ({:+.2f})", score),
+                            std::format("NEUTRAL / AUSGEWOGEN ({:+.2f})", score));
+        }
+        if (score > -0.45) {
+            return I18n::tr(std::format("TEMKİNLİ NEGATİF ({:+.2f})", score),
+                            std::format("CAUTIOUSLY NEGATIVE ({:+.2f})", score),
+                            std::format("VORSICHTIG NEGATIV ({:+.2f})", score));
+        }
+        return I18n::tr(std::format("GÜÇLÜ AYI / RİSK BASKISI ({:+.2f})", score),
+                        std::format("STRONG BEARISH / STRESS ({:+.2f})", score),
+                        std::format("STARK BÄRISCH / STRESS ({:+.2f})", score));
     }
 
+    // Live Borsa Istanbul (BIST 100 + USD/TRY + Live News) Macro Regime
     static RegionalMacroSentiment build_bist_macro_sentiment(LiveMarketDataClient* client = nullptr) {
         RegionalMacroSentiment macro;
         macro.region_name = "Borsa İstanbul (BIST 100)";
 
-        macro.macro_developments = {
-            {
-                "MSCI Statü Uyarısı & Küme Düşme Riski: MSCI, piyasa erişilebilirliği ve likidite gerekçesiyle Türkiye'nin Gelişmekte Olan Ülke (EM) statüsünden Öncü Pazarlar (Frontier) ligine düşürülebileceğine dair resmi uyarı yayınladı.",
-                "MSCI Global Index Review / Reuters Finans",
-                "Küresel pasif fonlarda zorunlu likidasyon ve sermaye çıkışını tetikleyerek BIST 100'de devre kesicilere ve sert bir çakılmaya yol açtı.",
-                -0.92
-            },
-            {
-                "Yabancı Takas Oranında Çöküş & Satış Dalgası: Yabancı yatırımcılar lokomotif BIST 30 hisselerinde (THYAO, ASELSAN, TÜPRAŞ) derin satış baskısı oluşturuyor.",
-                "Foreks Haber / Bloomberg HT",
-                "Borsada likidite sıkışıklığına ve yabancı payında sert gerilemeye neden olarak değerlemeleri aşağı çekiyor.",
-                -0.82
-            },
-            {
-                "TCMB Sıkı Para Politikası & Güvenli Liman: TCMB politika faizini %50 seviyesinde tutarak risksiz %45 mevduat ve PPF getirisi sağlamaya devam ediyor.",
-                "TCMB / Bloomberg HT",
-                "Hisse senedi çakılması karşısında yerli sermayeyi koruyan en güçlü risksiz nakit sığınağı haline geldi.",
-                -0.45
-            }
-        };
+        double regime_score = 0.0;
+        int signal_parts = 0;
 
         if (client) {
-            auto live_bist_news = client->fetch_live_headlines("BIST 100 Turkey MSCI", 2);
+            auto xu100 = client->fetch_asset("XU100.IS", "3mo");
+            if (xu100.is_live && xu100.historical_prices.size() >= 5) {
+                macro.benchmark_spot = xu100.current_price;
+                macro.benchmark_volatility_pct = xu100.annualized_volatility * 100.0;
+                size_t n = xu100.historical_prices.size();
+                size_t back = (n > 21) ? (n - 21) : 0;
+                double ret20 = (xu100.historical_prices[back] > 0.0)
+                    ? ((xu100.current_price / xu100.historical_prices[back]) - 1.0) * 100.0
+                    : 0.0;
+                macro.benchmark_return_20d_pct = ret20;
+
+                double idx_pol = std::clamp(std::tanh(ret20 / 9.0), -0.85, 0.85);
+                regime_score += idx_pol;
+                ++signal_parts;
+
+                macro.macro_developments.push_back({
+                    I18n::tr(std::format("BIST 100 Endeks Rejimi (Canlı): {:.0f} puan │ 20-İş Günü Değişim: %{:+.2f} │ Yıllık Volatilite: %{:.1f}",
+                                         xu100.current_price, ret20, macro.benchmark_volatility_pct),
+                             std::format("BIST 100 Index Regime (Live): {:.0f} pts │ 20-Day Return: {:+.2f}% │ Annual Vol: {:.1f}%",
+                                         xu100.current_price, ret20, macro.benchmark_volatility_pct),
+                             std::format("BIST 100 Index-Regime (Live): {:.0f} Pkt │ 20-Tage-Rendite: {:+.2f}% │ Volatilität: {:.1f}%",
+                                         xu100.current_price, ret20, macro.benchmark_volatility_pct)),
+                    "Yahoo Finance / Borsa İstanbul [CANLI VERİ]",
+                    I18n::tr("Endeks momentum ve oynaklık rejimi hisse senedi beta risk iştahını doğrudan belirler.",
+                             "Index momentum and volatility regime govern local equity beta risk appetite.",
+                             "Index-Momentum und Volatilität bestimmen den lokalen Aktien-Risikoappetit."),
+                    idx_pol
+                });
+
+                if (ret20 <= -10.0 || (ret20 <= -6.0 && xu100.annualized_volatility >= 0.38)) {
+                    macro.is_crisis_regime = true;
+                }
+            }
+
+            auto usdtry = client->fetch_asset("TRY=X", "3mo");
+            if (usdtry.is_live && usdtry.historical_prices.size() >= 5) {
+                size_t n = usdtry.historical_prices.size();
+                size_t back = (n > 21) ? (n - 21) : 0;
+                double fx_chg = (usdtry.historical_prices[back] > 0.0)
+                    ? ((usdtry.current_price / usdtry.historical_prices[back]) - 1.0) * 100.0
+                    : 0.0;
+                // Sudden FX spike (>5% in 20d) stresses domestic multiples; mild crawl is neutral
+                double fx_pol = (fx_chg > 5.0) ? std::clamp(-(fx_chg - 3.0) / 10.0, -0.75, 0.0)
+                                               : std::clamp(0.10 - std::abs(fx_chg - 1.5) * 0.03, -0.25, 0.20);
+                regime_score += fx_pol;
+                ++signal_parts;
+
+                macro.macro_developments.push_back({
+                    I18n::tr(std::format("USD/TRY Kur & Likidite Dengesi (Canlı): {:.2f} TL (20-İş Günü Değişim: %{:+.2f})",
+                                         usdtry.current_price, fx_chg),
+                             std::format("USD/TRY FX & Liquidity Balance (Live): {:.2f} TRY (20-Day Change: {:+.2f}%)",
+                                         usdtry.current_price, fx_chg),
+                             std::format("USD/TRY Wechselkurs & Liquidität (Live): {:.2f} TRY (20-Tage: {:+.2f}%)",
+                                         usdtry.current_price, fx_chg)),
+                    "FX Spot Feed [CANLI VERİ]",
+                    I18n::tr("İhracatçı (THYAO, FROTO, ASELS) ve döviz açık/fazla pozisyonlu şirketlerin FAVÖK marjlarını etkiler.",
+                             "Directly impacts EBITDA margins of exporters and FX-exposed corporates.",
+                             "Beeinflusst direkt die EBITDA-Margen exportorientierter Unternehmen."),
+                    fx_pol
+                });
+            }
+
+            auto live_bist_news = client->fetch_live_headlines("Borsa Istanbul BIST 100 Turkey", 3);
             for (const auto& item : live_bist_news) {
-                MacroEconomicNews live_item;
-                live_item.title = item.title;
-                live_item.source = item.publisher + " [CANLI HABER]";
-                live_item.market_impact = "BIST piyasasında anlık likidite ve yatırımcı algısını şekillendiren canlı piyasa gelişmesi.";
-                live_item.polarity_score = score_headline(live_item.title);
-                macro.macro_developments.push_back(live_item);
+                double pol = score_headline(item.title);
+                macro.macro_developments.push_back({
+                    item.title,
+                    item.publisher + " [CANLI HABER]",
+                    I18n::tr("Borsa İstanbul likidite ve kurumsal fiyatlama akışına etki eden güncel haber.",
+                             "Live news headline impacting Borsa Istanbul liquidity and institutional pricing.",
+                             "Aktuelle Live-Nachricht mit Einfluss auf Borsa Istanbul."),
+                    pol
+                });
+                regime_score += pol;
+                ++signal_parts;
             }
         }
 
-        // Dynamically compute average polarity across developments
-        double total_polarity = 0.0;
-        for (const auto& dev : macro.macro_developments) {
-            total_polarity += dev.polarity_score;
+        if (macro.macro_developments.empty()) {
+            macro.macro_developments.push_back({
+                I18n::tr("BIST 100 canlı endeks/haber akışına şu an erişilemedi (Çevrimdışı Nötr Mod).",
+                         "BIST 100 live index/news stream currently unreachable (Offline Neutral Mode).",
+                         "BIST 100 Live-Stream derzeit nicht erreichbar (Offline Neutral-Modus)."),
+                "Sistem Durumu",
+                I18n::tr("Varsayımsal kriz/boğa senaryosu enjekte edilmeden nötr (0.00) baz alındı.",
+                         "Neutral (0.00) baseline applied without injecting synthetic crisis/bull bias.",
+                         "Neutrale Basis (0.00) ohne künstliche Verzerrung."),
+                0.0
+            });
         }
-        macro.overall_sentiment_score = total_polarity / static_cast<double>(macro.macro_developments.size());
-        macro.overall_sentiment_label = format_sentiment_label(macro.overall_sentiment_score);
+
+        macro.overall_sentiment_score = (signal_parts > 0)
+            ? std::clamp(regime_score / static_cast<double>(signal_parts), -1.0, 1.0)
+            : 0.0;
+        if (macro.overall_sentiment_score <= -0.55) {
+            macro.is_crisis_regime = true;
+        }
+        macro.overall_sentiment_label = format_sentiment_label(macro.overall_sentiment_score, signal_parts > 0);
         macro.overall_gauge_bar = format_sentiment_bar(macro.overall_sentiment_score, 6);
 
-        if (macro.overall_sentiment_score < -0.15) {
-            macro.macro_synthesis = "MSCI'ın gelişmekte olan ülke (EM) statüsüne yönelik küme düşürme uyarısı ve yabancı sermaye çıkışı Borsa İstanbul'da sert bir çakılma dalgası yaratmıştır. "
-                                    "Yabancı takasındaki gerileme ve devre kesiciler sebebiyle risk primi (CDS) yükselmiş, piyasa Kriz / Ağır Ayı Rejimine girmiştir. Sermaye risksiz %45 faiz sunan TL Para Piyasası Fonlarına kaymaktadır.";
+        if (macro.is_crisis_regime) {
+            macro.macro_synthesis = I18n::tr(
+                std::format("BIST 100 endeksinde son 20 iş gününde %{:+.1f} sert geri çekilme ve yüksek oynaklık (%{:.1f}) gözlenmektedir. Savunmacı nakit / düşük kaldıraçlı (Net Nakit) bilançolar önceliklendirilmelidir.",
+                            macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct),
+                std::format("BIST 100 exhibits severe 20-day drawdown ({:+.1f}%) and elevated volatility ({:.1f}%). Prioritize defensive cash and net-cash balance sheets.",
+                            macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct),
+                std::format("BIST 100 zeigt starken Rückgang ({:+.1f}%) bei hoher Volatilität ({:.1f}%). Defensive Net-Cash-Bilanzen bevorzugen.",
+                            macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct)
+            );
+        } else if (macro.overall_sentiment_score >= 0.15) {
+            macro.macro_synthesis = I18n::tr(
+                std::format("BIST 100 endeksi pozitif momentum (%{:+.1f} / 20G) ve dengeli kur görünümüyle hareket ediyor; güçlü FAVÖK büyümesi ve makul FD/FAVÖK çarpanlı sanayi/ihracat şirketleri öne çıkıyor.",
+                            macro.benchmark_return_20d_pct),
+                std::format("BIST 100 trades with constructive 20-day momentum ({:+.1f}%) and stable FX; strong EBITDA growers at reasonable EV/EBITDA multiples lead.",
+                            macro.benchmark_return_20d_pct),
+                std::format("BIST 100 mit positivem 20-Tage-Momentum ({:+.1f}%); Unternehmen mit starkem EBITDA-Wachstum führen.",
+                            macro.benchmark_return_20d_pct)
+            );
         } else {
-            macro.macro_synthesis = "TCMB'nin sıkı parasal duruşu ve dezenflasyon süreci TL varlıklara güven sağlarken, piyasada dengeli bir seyir izlenmektedir.";
+            macro.macro_synthesis = I18n::tr(
+                std::format("Borsa İstanbul seçici/dengeli rejimde (20G Endeks: %{:+.1f}, Vol: %{:.1f}); yüksek faiz ortamında Net Borç/FAVÖK oranı düşük ve nakit akışı güçlü hisselerde seçici pozisyonlanma rasyoneldir.",
+                            macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct),
+                std::format("Borsa Istanbul is in a selective regime (20D Index: {:+.1f}%, Vol: {:.1f}%); favor low Net-Debt/EBITDA and high free-cash-flow equities.",
+                            macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct),
+                std::format("Borsa Istanbul in selektivem Regime (20T Index: {:+.1f}%, Vol: {:.1f}%); niedrige Nettoschuld/EBITDA bevorzugen.",
+                            macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct)
+            );
         }
-
         return macro;
     }
 
+    // Live Frankfurt XETRA (DAX 40 + EUR/USD + Live News) Macro Regime
     static RegionalMacroSentiment build_xetra_macro_sentiment(LiveMarketDataClient& client) {
         RegionalMacroSentiment macro;
         macro.region_name = "Frankfurt XETRA (DAX 40)";
 
-        auto live_dax_news = client.fetch_live_headlines("DAX index Germany stocks", 2);
+        double regime_score = 0.0;
+        int signal_parts = 0;
 
-        macro.macro_developments = {
-            {
-                "Avrupa Merkez Bankası (ECB) Faiz İndirimi: ECB politika faizini düşürerek sanayi ve teknoloji yatırımlarına likidite desteği sağladı.",
-                "Handelsblatt / Reuters",
-                "DAX şirketlerinin finansman maliyetlerini düşürürken hisse senedi değerleme çarpanlarını (F/K) yukarı yönlü genişletiyor.",
-                0.65
-            },
-            {
-                "Almanya Savunma Fonu & NATO %2+ Hedefi: Bundeswehr modernizasyon bütçesi ve müttefik siparişleri hızlanıyor.",
-                "FAZ / Financial Times",
-                "Rheinmetall ve savunma tedarik zincirinde uzun vadeli rekor sipariş defteri ve yüksek marjlı nakit akışı sağlıyor.",
-                0.88
-            },
-            {
-                "Avrupa Kurumsal Bulut ve Yapay Zeka Dönüşümü: Alman sanayi devleri yerel veri merkezleri ve kurumsal AI yazılımlarına yatırımlarını artırıyor.",
-                "Reuters / CNBC Europe",
-                "SAP SE'nin kurumsal bulut gelirlerini ve yüksek marjlı yinelenen abonelik kârlılığını maksimize ediyor.",
-                0.72
-            }
-        };
+        auto dax = client.fetch_asset("^GDAXI", "3mo");
+        if (dax.is_live && dax.historical_prices.size() >= 5) {
+            macro.benchmark_spot = dax.current_price;
+            macro.benchmark_volatility_pct = dax.annualized_volatility * 100.0;
+            size_t n = dax.historical_prices.size();
+            size_t back = (n > 21) ? (n - 21) : 0;
+            double ret20 = (dax.historical_prices[back] > 0.0)
+                ? ((dax.current_price / dax.historical_prices[back]) - 1.0) * 100.0
+                : 0.0;
+            macro.benchmark_return_20d_pct = ret20;
 
-        // If live news found, append
-        if (!live_dax_news.empty()) {
-            for (const auto& item : live_dax_news) {
-                MacroEconomicNews live_item;
-                live_item.title = item.title;
-                live_item.source = item.publisher + " [CANLI HABER]";
-                live_item.market_impact = "DAX piyasasında anlık likidite ve yatırımcı algısını şekillendiren canlı piyasa gelişmesi.";
-                live_item.polarity_score = score_headline(live_item.title);
-                macro.macro_developments.push_back(live_item);
+            double idx_pol = std::clamp(std::tanh(ret20 / 6.0), -0.85, 0.85);
+            regime_score += idx_pol;
+            ++signal_parts;
+
+            macro.macro_developments.push_back({
+                I18n::tr(std::format("DAX 40 Endeks Performansı (Canlı): {:.0f} puan │ 20-İş Günü Getiri: %{:+.2f} │ Volatilite: %{:.1f}",
+                                     dax.current_price, ret20, macro.benchmark_volatility_pct),
+                         std::format("DAX 40 Index Performance (Live): {:.0f} pts │ 20-Day Return: {:+.2f}% │ Volatility: {:.1f}%",
+                                     dax.current_price, ret20, macro.benchmark_volatility_pct),
+                         std::format("DAX 40 Index-Performance (Live): {:.0f} Pkt │ 20-Tage-Rendite: {:+.2f}% │ Volatilität: {:.1f}%",
+                                     dax.current_price, ret20, macro.benchmark_volatility_pct)),
+                "XETRA / Yahoo Finance [CANLI VERİ]",
+                I18n::tr("Avrupa kurumsal sanayi, yazılım ve finans hisselerinin ana trend göstergesi.",
+                         "Primary trend gauge for European industrial, software, and financial blue-chips.",
+                         "Haupttrendindikator für europäische Industrie-, Software- und Finanztitel."),
+                idx_pol
+            });
+
+            if (ret20 <= -8.0 || (ret20 <= -5.0 && dax.annualized_volatility >= 0.30)) {
+                macro.is_crisis_regime = true;
             }
         }
 
-        // Dynamically compute average polarity across developments
-        double total_polarity = 0.0;
-        for (const auto& dev : macro.macro_developments) {
-            total_polarity += dev.polarity_score;
+        auto eurusd = client.fetch_asset("EURUSD=X", "3mo");
+        if (eurusd.is_live && eurusd.current_price > 0.0) {
+            macro.macro_developments.push_back({
+                std::format("EUR/USD Paritesi (Canlı): {:.4f}", eurusd.current_price),
+                "ECB / FX Feed [CANLI VERİ]",
+                I18n::tr("DAX küresel ihracatçılarının (SAP, Siemens, Rheinmetall) dolar bazlı rekabetçiliğini belirler.",
+                         "Shapes USD competitiveness of global DAX exporters.",
+                         "Bestimmt die USD-Wettbewerbsfähigkeit globaler DAX-Exporteure."),
+                0.05
+            });
         }
-        macro.overall_sentiment_score = total_polarity / static_cast<double>(macro.macro_developments.size());
-        macro.overall_sentiment_label = format_sentiment_label(macro.overall_sentiment_score);
+
+        auto live_dax_news = client.fetch_live_headlines("DAX Germany European stocks ECB", 3);
+        for (const auto& item : live_dax_news) {
+            double pol = score_headline(item.title);
+            macro.macro_developments.push_back({
+                item.title,
+                item.publisher + " [CANLI HABER]",
+                I18n::tr("XETRA piyasasında kurumsal fon akışlarını etkileyen canlı haber.",
+                         "Live headline influencing institutional flows on Frankfurt XETRA.",
+                         "Live-Nachricht mit Einfluss auf institutionelle XETRA-Ströme."),
+                pol
+            });
+            regime_score += pol;
+            ++signal_parts;
+        }
+
+        macro.overall_sentiment_score = (signal_parts > 0)
+            ? std::clamp(regime_score / static_cast<double>(signal_parts), -1.0, 1.0)
+            : 0.0;
+        macro.overall_sentiment_label = format_sentiment_label(macro.overall_sentiment_score, signal_parts > 0);
         macro.overall_gauge_bar = format_sentiment_bar(macro.overall_sentiment_score, 6);
 
-        if (macro.overall_sentiment_score < -0.15) {
-            macro.macro_synthesis = "Euro Bölgesi'nde jeopolitik gerilimler, enerji fiyat şokları ve imalat sanayii daralması DAX endeksinde sert satış baskısı yaratmıştır. Sermaye risksiz Alman Devlet Tahvillerine (Bund) ve nakde yönelmektedir.";
-        } else {
-            macro.macro_synthesis = "ECB'nin faiz indirim döngüsü Euro Bölgesi kurumsal yatırımlarını canlandırırken, Almanya ve NATO'nun savunma bütçesi artışı ile kurumsal yapay zeka dönüşümü DAX lokomotiflerini desteklemektedir.";
-        }
-
+        macro.macro_synthesis = I18n::tr(
+            std::format("Frankfurt XETRA (DAX 40) son 20 iş gününde %{:+.2f} değişim ve %{:.1f} yıllık volatilite ile işlem görmektedir.",
+                        macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct),
+            std::format("Frankfurt XETRA (DAX 40) trades with a {:+.2f}% 20-day return and {:.1f}% annualized volatility.",
+                        macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct),
+            std::format("Frankfurt XETRA (DAX 40) handelt mit {:+.2f}% 20-Tage-Rendite und {:.1f}% Volatilität.",
+                        macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct)
+        );
         return macro;
     }
 
+    // Live Wall Street (S&P 500 + CBOE VIX + US Treasury Yield Curve + Live News) Macro Regime
     static RegionalMacroSentiment build_us_macro_sentiment(LiveMarketDataClient& client) {
         RegionalMacroSentiment macro;
         macro.region_name = "Wall Street (S&P 500 & NASDAQ)";
 
-        auto live_spy_news = client.fetch_live_headlines("S&P 500 stock market Wall Street", 2);
+        double regime_score = 0.0;
+        int signal_parts = 0;
 
-        macro.macro_developments = {
-            {
-                "FED Faiz İndirim Döngüsü & Yumuşak İniş: ABD Merkez Bankası enflasyonun hedefe yakınsamasıyla faiz indirimlerini sürdürerek ekonomide yumuşak inişi hedefliyor.",
-                "Wall Street Journal / Bloomberg",
-                "Risk iştahını canlı tutarken hisse senedi çarpanlarını destekliyor, sabit getirili bonolarda getiri eğrisini normalize ediyor.",
-                0.68
-            },
-            {
-                "Yapay Zeka ve Büyük Teknoloji Capex Patlaması: Mega-Cap şirketler veri merkezleri ve yapay zeka GPU altyapılarına yönelik harcamalarını artırıyor.",
-                "Yahoo Finance / CNBC",
-                "Nvidia, Microsoft ve Apple ekosisteminde rekor operasyonel marjları ve gelir büyümesini koruyor.",
-                0.82
-            }
-        };
+        auto spx = client.fetch_asset("^GSPC", "3mo");
+        if (spx.is_live && spx.historical_prices.size() >= 5) {
+            macro.benchmark_spot = spx.current_price;
+            macro.benchmark_volatility_pct = spx.annualized_volatility * 100.0;
+            size_t n = spx.historical_prices.size();
+            size_t back = (n > 21) ? (n - 21) : 0;
+            double ret20 = (spx.historical_prices[back] > 0.0)
+                ? ((spx.current_price / spx.historical_prices[back]) - 1.0) * 100.0
+                : 0.0;
+            macro.benchmark_return_20d_pct = ret20;
 
-        if (!live_spy_news.empty()) {
-            for (const auto& item : live_spy_news) {
-                MacroEconomicNews live_item;
-                live_item.title = item.title;
-                live_item.source = item.publisher + " [CANLI HABER]";
-                live_item.market_impact = "Wall Street endekslerinde anlık fiyatlamayı ve vadeli işlemleri yönlendiren son dakika canlı piyasa gelişmesi.";
-                live_item.polarity_score = score_headline(live_item.title);
-                macro.macro_developments.push_back(live_item);
-            }
+            double idx_pol = std::clamp(std::tanh(ret20 / 5.5), -0.85, 0.85);
+            regime_score += idx_pol;
+            ++signal_parts;
+
+            macro.macro_developments.push_back({
+                I18n::tr(std::format("S&P 500 Endeks Rejimi (Canlı): {:.2f} │ 20-İş Günü Getiri: %{:+.2f} │ Gerçekleşen Vol: %{:.1f}",
+                                     spx.current_price, ret20, macro.benchmark_volatility_pct),
+                         std::format("S&P 500 Index Regime (Live): {:.2f} │ 20-Day Return: {:+.2f}% │ Realized Vol: {:.1f}%",
+                                     spx.current_price, ret20, macro.benchmark_volatility_pct),
+                         std::format("S&P 500 Index-Regime (Live): {:.2f} │ 20-Tage-Rendite: {:+.2f}% │ Volatilität: {:.1f}%",
+                                     spx.current_price, ret20, macro.benchmark_volatility_pct)),
+                "CME / S&P Dow Jones [CANLI VERİ]",
+                I18n::tr("Küresel hisse senedi risk iştahı ve sermaye akımlarının birincil referansı.",
+                         "Primary global equity risk-appetite and institutional allocation benchmark.",
+                         "Primärer globaler Referenzwert für Aktien-Risikoappetit."),
+                idx_pol
+            });
+
+            if (ret20 <= -8.0) macro.is_crisis_regime = true;
         }
 
-        // Dynamically compute average polarity across developments
-        double total_polarity = 0.0;
-        for (const auto& dev : macro.macro_developments) {
-            total_polarity += dev.polarity_score;
+        auto vix = client.fetch_asset("^VIX", "1mo");
+        auto yc = client.fetch_treasury_yields();
+        if (vix.is_live && vix.current_price > 0.0) {
+            double vix_pol = std::clamp((20.0 - vix.current_price) / 14.0, -0.85, 0.55);
+            regime_score += vix_pol;
+            ++signal_parts;
+            if (vix.current_price >= 32.0) macro.is_crisis_regime = true;
+
+            double slope_bps = (yc.ten_year_yield - yc.three_month_yield) * 10000.0;
+            macro.macro_developments.push_back({
+                I18n::tr(std::format("CBOE VIX Korku Endeksi: {:.2f} │ ABD Hazine 3A: %{:.2f} / 10Y: %{:.2f} (Eğim: {:+.0f} bps)",
+                                     vix.current_price, yc.three_month_yield * 100.0, yc.ten_year_yield * 100.0, slope_bps),
+                         std::format("CBOE VIX Volatility: {:.2f} │ US Treasury 3M: {:.2f}% / 10Y: {:.2f}% (Slope: {:+.0f} bps)",
+                                     vix.current_price, yc.three_month_yield * 100.0, yc.ten_year_yield * 100.0, slope_bps),
+                         std::format("CBOE VIX: {:.2f} │ US-Staatsanleihen 3M: {:.2f}% / 10J: {:.2f}% (Steigung: {:+.0f} bps)",
+                                     vix.current_price, yc.three_month_yield * 100.0, yc.ten_year_yield * 100.0, slope_bps)),
+                "CBOE / US Treasury [CANLI VERİ]",
+                I18n::tr("Opsiyon ima edilen oynaklığı (VIX) ve iskonto oranları çarpan genişlemesini/daralmasını belirler.",
+                         "Option implied volatility (VIX) and discount rates drive multiple expansion/compression.",
+                         "Implizite Volatilität (VIX) und Diskontsätze steuern die Bewertungsmultiplikatoren."),
+                vix_pol
+            });
         }
-        macro.overall_sentiment_score = total_polarity / static_cast<double>(macro.macro_developments.size());
-        macro.overall_sentiment_label = format_sentiment_label(macro.overall_sentiment_score);
+
+        auto live_spy_news = client.fetch_live_headlines("S&P 500 Wall Street Federal Reserve earnings", 3);
+        for (const auto& item : live_spy_news) {
+            double pol = score_headline(item.title);
+            macro.macro_developments.push_back({
+                item.title,
+                item.publisher + " [CANLI HABER]",
+                I18n::tr("Wall Street endekslerinde kurumsal fiyatlamayı yönlendiren canlı piyasa haberi.",
+                         "Live market headline shaping institutional pricing on Wall Street.",
+                         "Live-Marktnachricht mit Einfluss auf die Wall Street."),
+                pol
+            });
+            regime_score += pol;
+            ++signal_parts;
+        }
+
+        macro.overall_sentiment_score = (signal_parts > 0)
+            ? std::clamp(regime_score / static_cast<double>(signal_parts), -1.0, 1.0)
+            : 0.0;
+        macro.overall_sentiment_label = format_sentiment_label(macro.overall_sentiment_score, signal_parts > 0);
         macro.overall_gauge_bar = format_sentiment_bar(macro.overall_sentiment_score, 6);
 
-        if (macro.overall_sentiment_score < -0.15) {
-            macro.macro_synthesis = "Wall Street'te faiz endişeleri, teknoloji değerleme düzeltmesi veya jeopolitik riskler sebebiyle riskten kaçış hakimdir. Sermaye kısa vadeli ABD Hazine Bonolarına (^IRX / SGOV) sığınmaktadır.";
-        } else {
-            macro.macro_synthesis = "FED'in dezenflasyona paralel kademeli faiz indirim döngüsü ve büyük teknoloji şirketlerinin rekor AI sermaye harcamaları Wall Street'te kârlılık büyümesini ve piyasa rallisini canlı tutmaktadır.";
-        }
-
+        macro.macro_synthesis = I18n::tr(
+            std::format("Wall Street (S&P 500) son 20 iş gününde %{:+.2f} getiri ve %{:.1f} gerçekleşen volatilite ile fiyatlanmaktadır.",
+                        macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct),
+            std::format("Wall Street (S&P 500) prices in a {:+.2f}% 20-day return with {:.1f}% realized volatility.",
+                        macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct),
+            std::format("Wall Street (S&P 500) notiert mit {:+.2f}% 20-Tage-Rendite bei {:.1f}% Volatilität.",
+                        macro.benchmark_return_20d_pct, macro.benchmark_volatility_pct)
+        );
         return macro;
     }
 
-    // Generates a rich sentiment and macro profile for an individual asset
+    // Live, unbiased per-asset news sentiment profile with exponential recency decay (NO hardcoded ticker biases!)
     static AssetSentimentProfile get_asset_sentiment(const std::string& ticker,
                                                      const std::string& company_name,
                                                      LiveMarketDataClient& client) {
         AssetSentimentProfile prof;
-        prof.ticker = ticker;
+        prof.ticker = LiveMarketDataClient::normalize_symbol(ticker);
         prof.company_name = company_name;
 
-        if (ticker == "THYAO.IS") {
-            prof.sentiment_score = -0.72;
-            prof.macro_catalyst = "Operasyonel yolcu ve kargo kapasitesi güçlü kalsa da MSCI şoku kaynaklı yabancı kurumsal satış dalgası hissede sert geri çekilmeye yol açıyor.";
-            prof.macro_risk = "MSCI EM endeksinden olası ağırlık indirimi, yabancı pasif fon çıkışları ve jeopolitik hava sahası riskleri.";
-            prof.headlines = {
-                {"MSCI uyarısı sonrası yabancı fonların THYAO hisselerinde yoğun satışları dikkat çekiyor", "Reuters Finans", -0.85},
-                {"Endeksteki çakılma dalgasında THYAO devre kesti; yabancı takas payı geriliyor", "Bloomberg HT", -0.75}
-            };
-        } else if (ticker == "ASELS.IS") {
-            prof.sentiment_score = -0.58;
-            prof.macro_catalyst = "Savunma Sanayii Başkanlığı sipariş birikimi ve yüksek ihracat potansiyeli defansif kalkan sunuyor; ancak genel borsa satışından kaçamıyor.";
-            prof.macro_risk = "Piyasa geneline yayılan panik satışı ve kurumsal fonların likidite ihtiyacı sebebiyle defansif hisseleri nakde çevirmesi.";
-            prof.headlines = {
-                {"Borsa genelindeki sert satış dalgası teknoloji ve savunma lokomotiflerini de baskılıyor", "Foreks Haber", -0.65},
-                {"ASELSAN güçlü sipariş defterine rağmen endeks çakılması nedeniyle geriledi", "Matriks", -0.55}
-            };
-        } else if (ticker == "TUPRS.IS") {
-            prof.sentiment_score = -0.65;
-            prof.macro_catalyst = "Akdeniz rafineri marjları ve yüksek temettü gücü orta vadeli çıpa olmayı sürdürüyor.";
-            prof.macro_risk = "Yabancı takasındaki çözülme, Brent petrol fiyatlarındaki volatilite ve endeks çakılması.";
-            prof.headlines = {
-                {"Tüpraş hisselerinde yabancı satışı hız kazandı; marjlar genel endeks satışını dengeleyemiyor", "Dünya Gazetesi", -0.70},
-                {"Endeks çöküşünde sanayi devlerinde devre kesici çalıştı", "Bloomberg HT", -0.60}
-            };
-        } else if (ticker == "BIMAS.IS") {
-            prof.sentiment_score = -0.42;
-            prof.macro_catalyst = "Temel gıda perakendesi olması sebebiyle kriz ve çakılma dönemlerinde en az etkilenen defansif nakit limanı.";
-            prof.macro_risk = "Genel piyasa likidite krizi ve yabancı portföy tasfiyeleri.";
-            prof.headlines = {
-                {"Piyasa çakılırken perakende hisseleri defansif yapısıyla görece daha dirençli kalmaya çalışıyor", "Ekonomi Gazetesi", -0.45},
-                {"Tüketici talebi gıdada sürse de genel borsa satışı hisseleri baskılıyor", "Finans Gündem", -0.40}
-            };
-        } else if (ticker == "RHM.DE") {
-            prof.sentiment_score = 0.88;
-            prof.macro_catalyst = "NATO ülkelerinin savunma bütçelerini GSYİH'nin %2'si üzerine çıkarma kararı ve rekor mühimmat siparişleri.";
-            prof.macro_risk = "Olası bölgesel ateşkes senaryolarında yatırımcı kâr realizasyonları.";
-            auto live = client.fetch_live_headlines("Rheinmetall defense", 2);
-            if (!live.empty()) {
-                for (auto& h : live) {
-                    prof.headlines.push_back({h.title, h.publisher, score_headline(h.title)});
+        // Build clean search query tailored to asset type
+        std::string query = prof.ticker;
+        if (prof.ticker == "GRAM-ALTIN.TL" || prof.ticker == "GC=F") {
+            query = "Gold price bullion XAU";
+        } else if (prof.ticker == "GRAM-GUMUS.TL" || prof.ticker == "SI=F") {
+            query = "Silver price bullion XAG";
+        }
+
+        auto live = client.fetch_live_headlines(query, 5);
+        if (live.empty() && !company_name.empty() && company_name != prof.ticker) {
+            // Fallback search by company name, filtering for relevance to base ticker or first company token
+            std::string base_sym = prof.ticker;
+            auto dot = base_sym.find('.');
+            if (dot != std::string::npos) base_sym = base_sym.substr(0, dot);
+            std::string base_lower = utf8_to_lower(base_sym);
+            auto name_tokens = tokenize_words(utf8_to_lower(company_name));
+            std::string first_word = name_tokens.empty() ? "" : name_tokens.front();
+
+            auto alt_news = client.fetch_live_headlines(company_name, 5);
+            for (const auto& item : alt_news) {
+                std::string tl = utf8_to_lower(item.title);
+                if ((!base_lower.empty() && tl.find(base_lower) != std::string::npos) ||
+                    (first_word.size() >= 3 && tl.find(first_word) != std::string::npos)) {
+                    live.push_back(item);
                 }
-            } else {
-                prof.headlines = {
-                    {"European Defense Stocks Rally as NATO Order Books Hit All-Time Highs", "The Wall Street Journal", 0.88},
-                    {"Rheinmetall Secures Massive Ammunition and Armored Vehicle Contracts from European Allies", "Handelsblatt", 0.85}
-                };
             }
-        } else if (ticker == "SAP.DE") {
-            prof.sentiment_score = 0.74;
-            prof.macro_catalyst = "Avrupa genelinde işletmelerin bulut (Cloud) ve yapay zeka ERP çözümlerine geçişi.";
-            prof.macro_risk = "Almanya iç pazarındaki genel sanayi yavaşlamasının kurumsal BT bütçelerini kısma riski.";
-            auto live = client.fetch_live_headlines("SAP SE Cloud software", 2);
-            if (!live.empty()) {
-                for (auto& h : live) {
-                    prof.headlines.push_back({h.title, h.publisher, score_headline(h.title)});
-                }
-            } else {
-                prof.headlines = {
-                    {"SAP Cloud Revenue Accelerates Driven by Enterprise AI Integration", "Reuters", 0.78},
-                    {"German Software Giant SAP Raises Annual Free Cash Flow Outlook", "FAZ", 0.72}
-                };
+        }
+
+        int64_t now_sec = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+        if (!live.empty()) {
+            prof.has_live_news = true;
+            prof.live_headline_count = static_cast<int>(live.size());
+
+            double weighted_sum = 0.0;
+            double weight_total = 0.0;
+            for (const auto& h : live) {
+                double pol = score_headline(h.title);
+                double age_days = (h.publish_time > 0 && now_sec > h.publish_time)
+                    ? static_cast<double>(now_sec - h.publish_time) / 86400.0
+                    : 2.0;
+                // Exponential recency decay with tau = 7.0 days
+                double w = std::exp(-std::clamp(age_days, 0.0, 60.0) / 7.0);
+                prof.headlines.push_back({h.title, h.publisher, pol, h.publish_time, w});
+                weighted_sum += w * pol;
+                weight_total += w;
             }
-        } else if (ticker == "SIE.DE") {
-            prof.sentiment_score = 0.62;
-            prof.macro_catalyst = "Küresel elektrik şebekesi modernizasyonu ve endüstriyel otomasyon yatırımları.";
-            prof.macro_risk = "Çin pazarındaki endüstriyel talep dalgalanmaları ve imalat PMI zayıflığı.";
-            prof.headlines = {
-                {"Siemens Wins Major Grid Infrastructure and Electrification Orders Globally", "Handelsblatt", 0.68},
-                {"Digital Industries Division Adapts to Shifts in Global Factory Automation", "Bloomberg", 0.58}
-            };
-        } else if (ticker == "ALV.DE") {
-            prof.sentiment_score = 0.55;
-            prof.macro_catalyst = "Yüksek faiz ortamında yatırım portföyü getirileri ve istikrarlı temettü verimi (%5+).";
-            prof.macro_risk = "Büyük ölçekli küresel doğal afet tazminatları ve reasürans maliyetleri.";
-            prof.headlines = {
-                {"Allianz Reports Strong Operating Profit in Property and Casualty Insurance", "Börsen-Zeitung", 0.60},
-                {"Attractive Dividend Payout Keeps Allianz a Favorite for Conservative Income Investors", "Finanzen.net", 0.52}
-            };
-        } else if (ticker == "SPY") {
-            prof.sentiment_score = 0.68;
-            prof.macro_catalyst = "FED'in faiz indirim döngüsü ve kurumsal kârlılıkların sağlam kalması.";
-            prof.macro_risk = "Yüksek değerleme çarpanları ve jeopolitik petrol şokları.";
-            auto live = client.fetch_live_headlines("SPY S&P 500 ETF", 2);
-            if (!live.empty()) {
-                for (auto& h : live) {
-                    prof.headlines.push_back({h.title, h.publisher, score_headline(h.title)});
-                }
-            } else {
-                prof.headlines = {
-                    {"S&P 500 Climbs to Fresh Records Driven by Broad Market Participation", "Yahoo Finance", 0.72},
-                    {"Corporate Earnings Beat Expectations Bolstering Economic Soft-Landing Hopes", "Wall Street Journal", 0.66}
-                };
-            }
-        } else if (ticker == "NVDA") {
-            prof.sentiment_score = 0.85;
-            prof.macro_catalyst = "Generative AI ve LLM modellerinin eğitimi için yapay zeka GPU'larına olan doymak bilmez talep.";
-            prof.macro_risk = "ABD-Çin çip ihracat kısıtlamaları ve Blackwell mimarisi tedarik darboğazları.";
-            auto live = client.fetch_live_headlines("Nvidia AI GPU", 2);
-            if (!live.empty()) {
-                for (auto& h : live) {
-                    prof.headlines.push_back({h.title, h.publisher, score_headline(h.title)});
-                }
-            } else {
-                prof.headlines = {
-                    {"Nvidia AI Chip Demand Shows No Signs of Slowing Ahead of Next-Gen Architecture", "Bloomberg", 0.88},
-                    {"Hyperscalers Reaffirm Multibillion-Dollar Cloud Infrastructure Commitments", "CNBC", 0.84}
-                };
-            }
-        } else if (ticker == "AAPL") {
-            prof.sentiment_score = 0.64;
-            prof.macro_catalyst = "Apple Intelligence ekosistem yükseltme döngüsü ve yüksek marjlı servis gelirleri.";
-            prof.macro_risk = "Çin pazarındaki yerel telefon rekabeti ve AB düzenleyici antitröst incelemeleri.";
-            prof.headlines = {
-                {"Apple Services Division Continues Stellar Growth Reaching New Revenue Milestones", "Reuters", 0.70},
-                {"Supply Chain Reports Indicate Steady Demand for AI-Enabled Device Lineup", "MacRumors", 0.60}
-            };
+
+            double raw_avg = (weight_total > 0.0) ? (weighted_sum / weight_total) : 0.0;
+            // Empirical Bayes shrinkage for small headline count so 1 headline doesn't overfit
+            double shrink = static_cast<double>(live.size()) / (static_cast<double>(live.size()) + 1.5);
+            prof.sentiment_score = std::clamp(raw_avg * shrink, -1.0, 1.0);
         } else {
-            // General asset (e.g. HEI.DE, DE, CAT, AMD, PLTR, or any global stock)
-            // Compute objective baseline from actual live price-volume flow instead of a static bullish bias
-            double flow_baseline = 0.0;
-            auto mkt = client.fetch_asset(ticker, "1mo");
-            if (mkt.historical_prices.size() >= 5 && mkt.historical_volumes.size() == mkt.historical_prices.size()) {
-                double up_v = 0.0, down_v = 0.0;
-                for (size_t i = 1; i < mkt.historical_prices.size(); ++i) {
-                    double d = mkt.historical_prices[i] - mkt.historical_prices[i - 1];
-                    if (d > 0.0) up_v += mkt.historical_volumes[i];
-                    else if (d < 0.0) down_v += mkt.historical_volumes[i];
-                }
-                if (up_v + down_v > 0.0) {
-                    flow_baseline = (up_v - down_v) / (up_v + down_v);
-                }
-            }
-            prof.sentiment_score = std::clamp(flow_baseline, -0.65, 0.65);
-            prof.macro_catalyst = "Canlı borsa emir/hacim dengesi (OBV akışı), sektör büyümesi ve kurumsal fiyatlama dinamikleri.";
-            prof.macro_risk = "Makroekonomik faiz oranları, sektör rekabeti ve küresel piyasa oynaklığı.";
-            auto live = client.fetch_live_headlines(ticker, 3);
-            if (!live.empty()) {
-                for (auto& h : live) {
-                    double s = score_headline(h.title);
-                    prof.headlines.push_back({h.title, h.publisher, (std::abs(s) > 0.01 ? s : prof.sentiment_score)});
-                }
-            } else {
-                prof.headlines = {
-                    {std::format("{} hissesi canlı hacim/fiyat akışı ({:+.2f}) doğrultusunda fiyatlanıyor", ticker, prof.sentiment_score), "Canlı Piyasa Akışı", prof.sentiment_score}
-                };
-            }
+            prof.has_live_news = false;
+            prof.live_headline_count = 0;
+            prof.sentiment_score = 0.0;
         }
 
-        // If headlines were collected, blend their polarity with baseline
-        if (!prof.headlines.empty()) {
-            double hl_sum = 0.0;
-            for (const auto& h : prof.headlines) {
-                hl_sum += h.polarity_score;
-            }
-            double hl_avg = hl_sum / static_cast<double>(prof.headlines.size());
-            // 50% fundamental baseline + 50% real-time headlines
-            prof.sentiment_score = 0.50 * prof.sentiment_score + 0.50 * hl_avg;
-            prof.sentiment_score = std::clamp(prof.sentiment_score, -1.0, 1.0);
+        // Dynamic, asset-appropriate catalyst & risk context (informational only; never biases score)
+        if (prof.ticker == "GRAM-ALTIN.TL" || prof.ticker == "GC=F" ||
+            prof.ticker == "GRAM-GUMUS.TL" || prof.ticker == "SI=F") {
+            prof.macro_catalyst = I18n::tr(
+                "Küresel merkez bankası rezerv alımları, ABD reel tahvil faizleri (TIPS) ve kur dinamikleri.",
+                "Central bank reserve accumulation, US real yields (TIPS), and currency dynamics.",
+                "Zentralbank-Reservekäufe, US-Realrenditen und Wechselkursdynamik."
+            );
+            prof.macro_risk = I18n::tr(
+                "ABD Dolar Endeksi (DXY) güçlenmesi ve reel faizlerde yukarı yönlü şoklar.",
+                "US Dollar Index (DXY) strength and upward shocks in real Treasury yields.",
+                "Stärke des US-Dollar-Index (DXY) und steigende Realzinsen."
+            );
+        } else if (prof.ticker.ends_with(".IS")) {
+            prof.macro_catalyst = I18n::tr(
+                "Canlı haber akışı, çeyreklik FAVÖK marj evrimi, ihracat/iç talep dengesi ve yabancı kurumsal akımlar.",
+                "Live news flow, quarterly EBITDA margin trajectory, export/domestic demand mix, and institutional flows.",
+                "Live-Nachrichtenfluss, EBITDA-Margenentwicklung und institutionelle Kapitalströme."
+            );
+            prof.macro_risk = I18n::tr(
+                "Yüksek TL finansman maliyeti (Net Borç/FAVÖK baskısı), kur/enflasyon geçişkenliği ve likidite oynaklığı.",
+                "High TRY financing costs (Net Debt/EBITDA pressure), FX/inflation pass-through, and liquidity volatility.",
+                "Hohe TRY-Finanzierungskosten (Nettoschuld/EBITDA-Druck) und Liquiditätsvolatilität."
+            );
+        } else if (prof.ticker.ends_with(".DE")) {
+            prof.macro_catalyst = I18n::tr(
+                "ECB para politikası, Avrupa sanayi/teknoloji sipariş defteri ve serbest nakit akışı büyümesi.",
+                "ECB monetary stance, European industrial/tech order backlog, and free cash flow expansion.",
+                "EZB-Geldpolitik, europäischer Auftragsbestand und Free-Cashflow-Wachstum."
+            );
+            prof.macro_risk = I18n::tr(
+                "Euro Bölgesi PMI yavaşlaması, enerji maliyetleri ve küresel gümrük tarifesi belirsizlikleri.",
+                "Eurozone PMI slowdown, energy input costs, and global tariff uncertainties.",
+                "Eurozonen-PMI-Abschwächung, Energiekosten und globale Zollunsicherheiten."
+            );
+        } else {
+            prof.macro_catalyst = I18n::tr(
+                "Çeyreklik bilanço/FAVÖK büyümesi, analist rehberlik (guidance) revizyonları ve FED likidite döngüsü.",
+                "Quarterly earnings/EBITDA growth, forward guidance revisions, and Fed liquidity cycle.",
+                "Quartals-EBITDA-Wachstum, Guidance-Revisionen und Fed-Liquiditätszyklus."
+            );
+            prof.macro_risk = I18n::tr(
+                "ABD Hazine tahvil getirilerinde yükseliş, çarpan daralması ve sektörel rekabet baskısı.",
+                "Rising US Treasury yields, valuation multiple compression, and sector competition.",
+                "Steigende US-Anleiherenditen, Bewertungskompression und Branchenwettbewerb."
+            );
         }
 
-        prof.sentiment_label = format_sentiment_label(prof.sentiment_score);
+        prof.sentiment_label = format_sentiment_label(prof.sentiment_score, prof.has_live_news);
         prof.sentiment_bar = format_sentiment_bar(prof.sentiment_score, 6);
-
         return prof;
     }
 };

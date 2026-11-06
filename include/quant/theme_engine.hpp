@@ -82,11 +82,48 @@ public:
         std::cout << palette().glow_rgb << text << palette().reset_code << "\n" << std::flush;
     }
 
+    static int utf8_visible_length(const std::string& line) {
+        int visible_len = 0;
+        bool in_escape = false;
+        for (size_t i = 0; i < line.size(); ++i) {
+            unsigned char c = static_cast<unsigned char>(line[i]);
+            if (c == '\033') {
+                in_escape = true;
+            } else if (in_escape && c == 'm') {
+                in_escape = false;
+            } else if (!in_escape) {
+                // Skip UTF-8 Variation Selector-16 (EF B8 8F) which has 0 terminal width
+                if (c == 0xEF && i + 2 < line.size() &&
+                    static_cast<unsigned char>(line[i + 1]) == 0xB8 &&
+                    static_cast<unsigned char>(line[i + 2]) == 0x8F) {
+                    i += 2;
+                    continue;
+                }
+                // 4-byte Supplementary Plane Emojis (F0 9F .. ..) occupy 2 terminal columns
+                if (c == 0xF0 && i + 3 < line.size()) {
+                    visible_len += 2;
+                    i += 3;
+                    continue;
+                }
+                // Count UTF-8 leading bytes only (ignore continuation bytes 10xxxxxx)
+                if ((c & 0xC0) != 0x80) {
+                    visible_len++;
+                }
+            }
+        }
+        return visible_len;
+    }
+
+    static std::string pad_right(const std::string& text, int target_width) {
+        int pad = std::max(0, target_width - utf8_visible_length(text));
+        return text + std::string(static_cast<size_t>(pad), ' ');
+    }
+
     // Print a retro styled box panel
-    void print_box(const std::string& title, const std::vector<std::string>& lines, int width = 76) const {
+    void print_box(const std::string& title, const std::vector<std::string>& lines, int width = 78) const {
         const auto& p = palette();
         std::string top_border = "┌─[" + title + "]─";
-        while (static_cast<int>(top_border.length()) < width - 1) top_border += "─";
+        while (utf8_visible_length(top_border) < width - 1) top_border += "─";
         top_border += "┐";
 
         std::string bot_border = "└";
@@ -97,14 +134,7 @@ public:
         for (const auto& line : lines) {
             std::cout << p.base_rgb << "│ " << p.reset_code
                       << line;
-            // Pad remaining space
-            int visible_len = 0;
-            bool in_escape = false;
-            for (char c : line) {
-                if (c == '\033') in_escape = true;
-                else if (in_escape && c == 'm') in_escape = false;
-                else if (!in_escape) visible_len++;
-            }
+            int visible_len = utf8_visible_length(line);
             int padding = std::max(0, width - 4 - visible_len);
             for (int s = 0; s < padding; ++s) std::cout << " ";
             std::cout << p.base_rgb << " │" << p.reset_code << "\n";
@@ -120,7 +150,7 @@ public:
             std::cout << p.dim_rgb << line << p.reset_code << "\n";
         } else {
             std::string line = "─── " + title + " ";
-            while (static_cast<int>(line.length()) < width) line += "─";
+            while (utf8_visible_length(line) < width) line += "─";
             std::cout << p.base_rgb << line << p.reset_code << "\n";
         }
     }

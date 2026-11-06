@@ -18,7 +18,34 @@ endif()
 
 # Find Dependencies
 find_package(Threads REQUIRED)
-find_package(CURL REQUIRED)
+
+# CURL Discovery
+find_package(CURL QUIET)
+if(NOT CURL_FOUND)
+    find_path(CURL_INCLUDE_DIR NAMES curl/curl.h
+        PATHS
+        ${PROJECT_SOURCE_DIR}/deps/curl-8.23.0_8-win64-mingw/include
+        /usr/include
+        /usr/local/include
+        /opt/homebrew/include
+    )
+    find_library(CURL_LIBRARY NAMES curl libcurl libcurl.dll
+        PATHS
+        ${PROJECT_SOURCE_DIR}/deps/curl-8.23.0_8-win64-mingw/lib
+        /usr/lib
+        /usr/local/lib
+        /opt/homebrew/lib
+    )
+    if(CURL_INCLUDE_DIR AND CURL_LIBRARY)
+        add_library(CURL::libcurl UNKNOWN IMPORTED)
+        set_target_properties(CURL::libcurl PROPERTIES
+            INTERFACE_INCLUDE_DIRECTORIES "${CURL_INCLUDE_DIR}"
+            IMPORTED_LOCATION "${CURL_LIBRARY}"
+        )
+    else()
+        message(FATAL_ERROR "libcurl not found! Please install libcurl development headers.")
+    endif()
+endif()
 
 # Eigen3 Discovery
 find_package(Eigen3 3.3 QUIET NO_MODULE)
@@ -26,6 +53,7 @@ if(NOT Eigen3_FOUND)
     # Check common fallback locations
     find_path(EIGEN3_INCLUDE_DIR NAMES signature_of_eigen3_matrix_library
         PATHS
+        ${PROJECT_SOURCE_DIR}/deps/eigen-3.4.0
         /usr/include/eigen3
         /usr/local/include/eigen3
         /opt/homebrew/include/eigen3
@@ -47,6 +75,7 @@ find_package(Boost QUIET)
 if(NOT Boost_FOUND)
     find_path(BOOST_INCLUDE_DIR NAMES boost/version.hpp
         PATHS
+        ${PROJECT_SOURCE_DIR}/deps/boost_1_84_0
         /usr/include
         /usr/local/include
         /opt/homebrew/include
@@ -66,6 +95,8 @@ endif()
 # Project Targets
 add_executable(quant_suite src/main.cpp)
 
+target_compile_definitions(quant_suite PRIVATE BOOST_JSON_NO_LIB)
+
 target_include_directories(quant_suite PRIVATE
     ${PROJECT_SOURCE_DIR}/include
 )
@@ -76,6 +107,14 @@ target_link_libraries(quant_suite PRIVATE
     CURL::libcurl
     Threads::Threads
 )
+
+if(WIN32)
+    target_link_libraries(quant_suite PRIVATE ws2_32 crypt32 wldap32)
+endif()
+
+if(MINGW)
+    target_link_options(quant_suite PRIVATE -static-libgcc -static-libstdc++)
+endif()
 
 set_target_properties(quant_suite PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"

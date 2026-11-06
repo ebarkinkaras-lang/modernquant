@@ -6,9 +6,9 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg?style=flat-square)]()
 [![Memory Safety](https://img.shields.io/badge/AddressSanitizer-0%20leaks%20verified-success.svg?style=flat-square)]()
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg?style=flat-square)]()
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg?style=flat-square)]()
 [![Eigen](https://img.shields.io/badge/dependency-Eigen3%203.4+-orange.svg?style=flat-square)](https://eigen.tuxfamily.org/)
-[![Boost](https://img.shields.io/badge/dependency-Boost%201.80+-purple.svg?style=flat-square)](https://www.boost.org/)
+[![Boost](https://img.shields.io/badge/dependency-Boost%201.81+-purple.svg?style=flat-square)](https://www.boost.org/)
 
 ---
 
@@ -45,19 +45,11 @@
 * **Multilingual AI Copilot:** Natural language query processor understands tokens and terminology in Turkish, English, and German (e.g. `DAX analyse`, `RHM zielkurs`, `AAPL target`, `precious metals`, etc.).
 * **Zero Overhead Architecture:** Thread-safe, header-only C++20 singleton (`include/quant/i18n.hpp`) with zero external runtime dependencies.
 
-### 3. 🎯 Quant Forecast & Direction Predictor (`QuantForecastEngine`)
-* **Geometric Brownian Motion (GBM) Target Pricing:** Closed-form log-normal drift and diffusion modeling:
-  $$\mathbb{E}[S_T] = S_0 \cdot \exp(\mu \cdot T)$$
-* **Multi-Factor Drift Calibration ($\mu$):** Blends the regional risk-free rate, macroeconomic news sentiment shocks, and mean-reverting 30-day Volume Weighted Average Price (VWAP) forces.
-* **Precious Metals Live Synthesis:** Cross-calculates live **24K Gram Gold (`GRAM-ALTIN.TL`)** and **Gram Silver (`GRAM-GUMUS.TL`)** via live COMEX Ounces ($GC=F, SI=F) \times USD/TRY / 31.1034768.
-* **5-Level Directional Classification:**
-  * `🚀 GÜÇLÜ YUKARI` (Strong Bullish)
-  * `📈 YUKARI` (Bullish)
-  * `⚖️ NÖTR` (Neutral / Consolidation)
-  * `📉 AŞAĞI` (Bearish)
-  * `🔻 GÜÇLÜ AŞAĞI` (Strong Bearish)
-* **Probability Confidence Bands ($\pm 1\sigma$):** Statistical bull ceiling and bear support bounds with proven $\approx 68\%$ market realization coverage.
-* **Walk-Forward Out-of-Sample Backtester (`ForecastBacktestEngine`):** 1-year historical sliding-window validation verifying Mean Absolute Percentage Error (MAPE $\le 2\%$) and signal strategy PnL vs Buy & Hold.
+### 3. 🎯 Multi-Factor Quant Forecast, Microstructure & Multi-Currency FAVÖK Engine (`QuantForecastEngine` & `FundamentalEngine`)
+* **252-Trading-Day Grinold-Kahn Horizon Model:** Combines volatility-scaled 20d/60d momentum, 22-day Typical-Price Institutional VWAP & Wilder RSI-14 mean-reversion, OBV volume flow, recency-decayed word-boundary NLP sentiment, and horizon-weighted fundamental quality scores with Student-$t$ calibrated $\pm 1\sigma$ log-normal bands.
+* **Multi-Currency Institutional FAVÖK (EBITDA) & Valuation Engine (`fundamentals.hpp`):** Fetches trailing 12-month (TTM) financial statements via `fundamentals-timeseries` + `quoteSummary` and aligns functional reporting currencies (`USD`/`EUR`) with trading currencies (`TRY`/`EUR`/`USD`) using live FX rates—computing `EV/EBITDA (FD/FAVÖK)`, `Net Debt/EBITDA`, `EBITDA Margin`, `P/E`, `Forward P/E`, `P/B`, `ROE`, `ROA`, and `FCF Yield`, while cleanly distinguishing corporate equities, banks/insurers, and commodities/ETFs.
+* **Precious Metals Date-Aligned Live Synthesis:** Cross-calculates live **24K Gram Gold (`GRAM-ALTIN.TL`)** and **Gram Silver (`GRAM-GUMUS.TL`)** via date-aligned COMEX Ounces (`GC=F`, `SI=F`) $\times$ `USD/TRY` / 31.1034768.
+* **Causal 2-Year Walk-Forward Backtester (`ForecastBacktestEngine`):** Evaluates the exact live forecasting core out-of-sample across 2-year rolling windows with non-overlapping block $z$-statistics, Random-Walk MAPE benchmarks, and 10 bps transaction costs.
 
 ### 3. 🎯 Asymmetric Alpha & Radar-Altı Screener (`QuantOpportunityScanner`)
 * **Crowded Trade Filter (Sürü Tuzağı Tespiti):** Identifies and warns against retail FOMO consensus trades where risk/reward is asymmetrical against the trader ($R:R \approx 1 : 0.35$).
@@ -151,12 +143,23 @@ sudo apt install build-essential clang libeigen3-dev libboost-all-dev libcurl4-o
 
 ---
 
-### Building with Make
+### Building on Windows (PowerShell / MinGW-w64)
+
+```powershell
+# Compile optimized C++20 binary (bin\quant_suite.exe)
+.\build.ps1     # or build.bat
+
+# Run interactive terminal or 13-part verification suite
+.\run.ps1
+.\bin\quant_suite.exe --test
+```
+
+### Building with Make (macOS / Linux)
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-username>/ModernQuantSuite.git
-cd ModernQuantSuite
+git clone https://github.com/ebarkinkaras-lang/modernquant.git
+cd modernquant
 
 # 1. Compile Optimized Release Binary
 make release
@@ -223,12 +226,15 @@ Run `./bin/quant_suite --test` or `make test` to execute the built-in textbook m
 [TEST 5] Fixed Income & Bond Valuation (Chapter 7)                ✔ PASS
 [TEST 6] Eigen Linear Algebra, QR & PCA (Chapter 8)               ✔ PASS
 [TEST 7] Boost Accumulators & Drawdown Risk (Chapters 6 & 9)      ✔ PASS
-[TEST 8] Quant Target Price & Directional Regime (GBM & Sentiment)✔ PASS
-[TEST 9] Walk-Forward Forecast Backtest Engine                    ✔ PASS
-[TEST 10] Asymmetric Alpha & Hidden Opportunity Screener          ✔ PASS
+[TEST 8]  Grinold-Kahn Multi-Factor Target Price & Horizon Scaling   ✔ PASS
+[TEST 9]  Causal Walk-Forward Backtest & Non-Overlapping Blocks      ✔ PASS
+[TEST 10] Asymmetric Alpha Screener + Live Multi-Currency FAVÖK      ✔ PASS
+[TEST 11] Boost.JSON Null-Bar Alignment, Wilder ATR & Date Join      ✔ PASS
+[TEST 12] Word-Boundary NLP & Turkish UTF-8 Negation Sentiment       ✔ PASS
+[TEST 13] Multi-Currency FAVÖK (EBITDA), Bank & Commodity Engine     ✔ PASS
 
 -------------------------------------------------------
-[PASS] ALL TEXTBOOK VERIFICATION TESTS PASSED SUCCESSFULLY!
+[PASS] ALL 13 QUANT, MICROSTRUCTURE & FAVÖK TESTS PASSED!
 =======================================================
 ```
 
@@ -240,16 +246,18 @@ Run `./bin/quant_suite --test` or `make test` to execute the built-in textbook m
 ModernQuantSuite/
 ├── CMakeLists.txt            # Modern cross-platform CMake build configuration
 ├── Makefile                  # Optimized & dynamic C++20 Makefile (macOS / Linux)
+├── build.ps1 / build.bat     # Windows MinGW-w64 C++20 build scripts
+├── run.ps1 / run.bat         # Windows launcher scripts
 ├── LICENSE                   # MIT License
 ├── README.md                 # Project documentation & reference manual
-├── .gitignore                # Comprehensive Git ignore rules (bin, build, macOS, IDEs)
+├── .gitignore                # Comprehensive Git ignore rules (bin, build, deps, IDEs)
 ├── src/
 │   └── main.cpp              # Terminal CLI loop, interactive dispatcher, CRT rendering
 ├── include/
 │   └── quant/
-│       ├── advisor.hpp               # Regional investment advisor & macro crisis shield
-│       ├── alpha_screener.hpp        # Asymmetric alpha, crowded trade filter & volume squeeze
-│       ├── backtester.hpp            # Technical trading strategy backtester
+│       ├── advisor.hpp               # Regional covariance & FAVÖK capital allocation engine
+│       ├── alpha_screener.hpp        # Asymmetric OHLCV channel, squeeze & FAVÖK screener
+│       ├── backtester.hpp            # Causal technical strategy backtester (10bps cost)
 │       ├── binomial_lattice.hpp      # Binomial lattice option valuation (CRR)
 │       ├── black_scholes.hpp         # Analytical Black-Scholes & Greeks engine
 │       ├── bond.hpp                  # Fixed income bond valuation & day-count discounting
@@ -257,17 +265,19 @@ ModernQuantSuite/
 │       ├── copilot.hpp               # Natural language AI Quant Copilot dispatcher
 │       ├── dates.hpp                 # C++20 chrono business calendar & weekend rolls
 │       ├── daycount.hpp              # ISDA Act/365, Act/360, 30/360 conventions
-│       ├── forecast_backtest.hpp     # 1-year historical walk-forward backtesting engine
-│       ├── forecast_engine.hpp       # GBM target pricing & 5-level directional classification
-│       ├── live_market_data.hpp      # Real-time Yahoo Finance REST client via libcurl
+│       ├── forecast_backtest.hpp     # 2-year causal walk-forward & block validation engine
+│       ├── forecast_engine.hpp       # 252-day Grinold-Kahn target pricing & FAVÖK integration
+│       ├── fundamentals.hpp          # Multi-currency TTM FAVÖK (EBITDA), Bank & Macro engine
+│       ├── i18n.hpp                  # Trilingual (TR / EN / DE) localization engine
+│       ├── live_market_data.hpp      # Boost.JSON Yahoo Finance OHLCV, VWAP, EWMA & ATR client
 │       ├── monte_carlo.hpp           # Parallel std::async Monte Carlo simulation engine
-│       ├── news_sentiment.hpp        # Macro headlines parser & Bayesian sentiment engine
+│       ├── news_sentiment.hpp        # Word-boundary, negation-aware & decayed NLP engine
 │       ├── option_info.hpp           # Derivatives parameter definitions
-│       ├── pairs_trading.hpp         # Cointegration, Z-Score & Ornstein-Uhlenbeck half-life
+│       ├── pairs_trading.hpp         # Date-aligned OLS hedge ratio & OU half-life engine
 │       ├── payoff.hpp                # Polymorphic payoff functors (Call/Put)
 │       ├── portfolio_linear_algebra.hpp # Eigen matrix math, Cholesky, QR, and PCA
-│       ├── terminal_chart.hpp        # Unicode ASCII candlestick & volume chart engine
-│       ├── test_suite.hpp            # 10-part automated textbook verification suite
+│       ├── terminal_chart.hpp        # Real OHLCV Unicode candlestick & Wilder RSI chart engine
+│       ├── test_suite.hpp            # 13-part automated quant & FAVÖK verification suite
 │       ├── theme_engine.hpp          # 1980s retro CRT VT220/VT100 theme manager
 │       ├── trading_signals.hpp       # Boost Accumulators real-time streaming indicators
 │       └── yield_curve.hpp           # US Treasury yield curve bootstrapping

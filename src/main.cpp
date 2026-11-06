@@ -1,3 +1,8 @@
+#ifndef BOOST_JSON_NO_LIB
+#define BOOST_JSON_NO_LIB
+#endif
+#include <boost/json/src.hpp>
+
 #include "quant/concepts.hpp"
 #include "quant/dates.hpp"
 #include "quant/daycount.hpp"
@@ -11,6 +16,7 @@
 #include "quant/portfolio_linear_algebra.hpp"
 #include "quant/trading_signals.hpp"
 #include "quant/live_market_data.hpp"
+#include "quant/fundamentals.hpp"
 #include "quant/test_suite.hpp"
 #include "quant/theme_engine.hpp"
 #include "quant/terminal_chart.hpp"
@@ -100,11 +106,11 @@ void print_menu() {
          I18n::tr("Sermaye Dağıtım & Tavsiye", "Portfolio Allocation & Advice", "Kapitalallokation & Beratung"),
          I18n::tr("Paramı nereye, nasıl yatırayım? Somut Quant Strateji", "Concrete Quant allocation, risk & share sizing", "Konkrete Quant-Allokation, Risiko & Stückzahlen")},
         {"S",  "[SCREEN]",
-         I18n::tr("Asimetrik Alfa & Radar-Altı", "Asymmetric Alpha Screener", "Asymmetrischer Alpha Screener"),
-         I18n::tr("Başkalarının göremediği sessiz akümülasyon & sıkışma", "Off-radar volume accumulation & volatility squeeze", "Akkumulation unter dem Radar & Volatilitätssqueeze")},
+         I18n::tr("Asimetrik Alfa & FAVÖK Tarama", "Asymmetric Alpha & EBITDA Scan", "Alpha- & EBITDA-Screener"),
+         I18n::tr("OHLCV kanal, sıkışma & kur-uyumlu FAVÖK çarpanları", "OHLCV channel, squeeze & FX-aligned EBITDA multiples", "OHLCV-Kanal, Squeeze & EBITDA-Multiples")},
         {"F",  "[FORECAST]",
-         I18n::tr("Hedef Fiyat & Yön Tahmini", "Target Price & Direction Forecast", "Zielkurs & Richtungsprognose"),
-         I18n::tr("GBM Drift & Volatilite bazlı 1H/1A/3A hedef fiyat ve yön analizi", "GBM Drift & Volatility multi-horizon price targets", "GBM-Drift & Volatilität Multi-Horizont Kursziele")},
+         I18n::tr("Hedef Fiyat & FAVÖK Bilanço", "Target Price & EBITDA Card", "Zielkurs & EBITDA-Karte"),
+         I18n::tr("252-İşG kalibre ±1σ tahmin + FAVÖK/Emtia ek bilgisi", "252-TrdD ±1σ forecast + EBITDA/Commodity card", "252-HT ±1σ-Prognose + EBITDA-/Rohstoffkarte")},
         {"C",  "[COPILOT]",
          I18n::tr("AI Quant Copilot", "AI Quant Copilot", "KI-Quant-Copilot"),
          I18n::tr("Doğal dille canlı analiz, Black-Scholes & makro soruları", "Natural language market intelligence & macro Q&A", "Natürlichsprachige Markt-Intelligenz & Makro Q&A")},
@@ -153,11 +159,14 @@ void print_menu() {
     };
 
     for (const auto& item : menu) {
-        std::cout << std::format("│ {}{:<3}{} {:<10} {}{:<30}{} {}{:<32}{} │\n",
-                                 p.glow_rgb, item.key, p.reset_code,
-                                 item.tag,
-                                 p.base_rgb, item.title, p.reset_code,
-                                 p.dim_rgb, item.desc, p.reset_code);
+        std::string key_col   = ThemeEngine::pad_right(item.key, 3);
+        std::string tag_col   = ThemeEngine::pad_right(item.tag, 10);
+        std::string title_col = ThemeEngine::pad_right(item.title, 29);
+        std::string desc_col  = ThemeEngine::pad_right(item.desc, 33);
+        std::cout << "│ " << p.glow_rgb << key_col << p.reset_code << " "
+                  << tag_col << " "
+                  << p.base_rgb << title_col << p.reset_code << " "
+                  << p.dim_rgb << desc_col << p.reset_code << " │\n";
     }
     std::cout << p.glow_rgb << "└───────────────────────────────────────────────────────────────────────────────┘\n" << p.reset_code;
     std::cout << p.glow_rgb << "\n" << I18n::select_prompt() << p.reset_code;
@@ -193,48 +202,88 @@ void run_forecast_interactive(LiveMarketDataClient& client) {
     auto& te = ThemeEngine::instance();
     const auto& pal = te.palette();
     std::cout << "\n" << pal.glow_rgb
-              << I18n::tr("--- [F] HEDEF FİYAT & ZAMAN DİLİMLERİNE GÖRE YÖN TAHMİNİ ---",
-                          "--- [F] TARGET PRICE & MULTI-HORIZON DIRECTION FORECAST ---",
-                          "--- [F] ZIELKURS & MULTI-HORIZONT RICHTUNGSPROGNOSE ---")
+              << I18n::tr("--- [F] HEDEF FİYAT, YÖN TAHMİNİ & FAVÖK BİLANÇO EK BİLGİ MOTORU ---",
+                          "--- [F] TARGET PRICE, DIRECTION FORECAST & EBITDA FUNDAMENTAL CARD ---",
+                          "--- [F] ZIELKURS, RICHTUNGSPROGNOSE & EBITDA-FUNDAMENTALKARTE ---")
               << pal.reset_code << "\n";
-    std::cout << I18n::tr("Analiz edilecek hisse/varlık sembolünü girin\n  (örn: GRAM-ALTIN, GRAM-GUMUS, GC=F, SI=F, THYAO.IS, RHM.DE, SPY) [Default: THYAO.IS]: ",
-                          "Enter asset/stock symbol to analyze\n  (e.g., GRAM-ALTIN, GRAM-GUMUS, GC=F, SI=F, THYAO.IS, RHM.DE, SPY) [Default: THYAO.IS]: ",
-                          "Zu analysierendes Symbol eingeben\n  (z.B. GRAM-ALTIN, GRAM-GUMUS, GC=F, SI=F, THYAO.IS, RHM.DE, SPY) [Default: THYAO.IS]: ");
+    std::cout << I18n::tr("Analiz edilecek hisse/emtia sembolünü girin\n  (örn: THYAO.IS, ASTOR.IS, GARAN.IS, AAPL, RHM.DE, GRAM-ALTIN, GRAM-GUMUS, GC=F, SPY) [Default: THYAO.IS]: ",
+                          "Enter equity/commodity symbol to analyze\n  (e.g., THYAO.IS, ASTOR.IS, AAPL, RHM.DE, GRAM-ALTIN, GRAM-GUMUS, GC=F, SPY) [Default: THYAO.IS]: ",
+                          "Zu analysierendes Aktien-/Rohstoffsymbol eingeben\n  (z.B. THYAO.IS, AAPL, RHM.DE, GRAM-ALTIN, GC=F, SPY) [Default: THYAO.IS]: ");
     std::string sym;
     std::getline(std::cin, sym);
     if (sym.empty()) sym = "THYAO.IS";
+    sym = LiveMarketDataClient::normalize_symbol(sym);
 
-    std::cout << I18n::tr(std::format("Canlı piyasa verileri ve haber sentimeli çekiliyor ({})... ", sym),
-                          std::format("Fetching live market data & news sentiment ({})... ", sym),
-                          std::format("Live-Marktdaten & Sentiment werden geladen ({})... ", sym))
+    std::cout << I18n::tr(std::format("Canlı 6-aylık OHLCV, haber akışı ve TTM FAVÖK/bilanço verileri çekiliyor ({})... ", sym),
+                          std::format("Fetching live 6-month OHLCV, news & TTM EBITDA/fundamentals ({})... ", sym),
+                          std::format("Live 6-Monats-OHLCV, News & TTM-EBITDA werden geladen ({})... ", sym))
               << std::flush;
-    auto data = client.fetch_asset(sym, "1mo");
-    auto sent = NewsSentimentEngine::get_asset_sentiment(sym, sym, client);
+
+    auto data = client.fetch_asset(sym, "6mo");
+    if ((!data.is_live || data.current_price <= 0.0) &&
+        sym.find('.') == std::string::npos && sym.find('-') == std::string::npos && sym.find('=') == std::string::npos) {
+        auto bist_try = client.fetch_asset(sym + ".IS", "6mo");
+        if (bist_try.is_live && bist_try.current_price > 0.0) {
+            data = std::move(bist_try);
+            sym = data.symbol;
+        } else {
+            auto xetra_try = client.fetch_asset(sym + ".DE", "6mo");
+            if (xetra_try.is_live && xetra_try.current_price > 0.0) {
+                data = std::move(xetra_try);
+                sym = data.symbol;
+            }
+        }
+    }
+
+    if (data.current_price <= 0.0) {
+        std::cout << pal.red_rgb << "\n  ❌ "
+                  << I18n::tr(std::format("'{}' sembolü için geçerli bir borsa kotasyonu bulunamadı!\n", sym),
+                              std::format("Could not find a valid market quote for '{}'!\n", sym),
+                              std::format("Kein gültiger Börsenkurs für '{}' gefunden!\n", sym))
+                  << pal.reset_code;
+        return;
+    }
+
+    auto sent = NewsSentimentEngine::get_asset_sentiment(data.symbol, data.long_name, client);
+    auto fund = FundamentalEngine::fetch_fundamentals(client, data);
+    TreasuryYieldCurveData yc;
+    bool has_yc = false;
+    if (fund.asset_class == AssetClassType::CommodityOrFuture) {
+        yc = client.fetch_treasury_yields();
+        has_yc = true;
+    }
+
     std::cout << pal.green_rgb
               << I18n::tr("TAMAMLANDI!\n", "COMPLETED!\n", "ABGESCHLOSSEN!\n")
               << pal.reset_code;
 
-    auto multi = QuantForecastEngine::generate_multi_horizon(data, sent.sentiment_score, sent.sentiment_label);
+    auto multi = QuantForecastEngine::generate_multi_horizon(
+        data, sent.sentiment_score, sent.sentiment_label, sent.has_live_news,
+        &fund, has_yc ? &yc : nullptr
+    );
     QuantForecastEngine::render_forecast_matrix(multi);
 
-    std::cout << I18n::tr("\nÖzel bir gün sayısı (vade) sorgulamak ister misiniz? (Örn: 10, 45, 120 veya Enter'a basıp geçin): ",
-                          "\nQuery a custom forecast horizon in days? (e.g., 10, 45, 120 or press Enter to skip): ",
-                          "\nSpezifischen Zeithorizont in Tagen abfragen? (z.B. 10, 45, 120 oder Enter zum Überspringen): ");
+    std::cout << I18n::tr("\nÖzel bir gün sayısı (takvim günü) sorgulamak ister misiniz? (Örn: 14, 45, 180 veya Enter'a basıp geçin): ",
+                          "\nQuery a custom forecast horizon in calendar days? (e.g., 14, 45, 180 or press Enter to skip): ",
+                          "\nSpezifischen Zeithorizont in Kalendertagen abfragen? (z.B. 14, 45, 180 oder Enter): ");
     std::string days_str;
     std::getline(std::cin, days_str);
     if (!days_str.empty()) {
         try {
             int d = std::stoi(days_str);
             if (d > 0) {
-                auto custom_res = QuantForecastEngine::forecast_for_days(data, sent.sentiment_score, d);
+                auto custom_res = QuantForecastEngine::forecast_for_days(
+                    data, sent.sentiment_score, d, "", sent.has_live_news, &fund
+                );
+                std::string card_hdr = I18n::tr(
+                    std::format("║  🎯 {} TAKVİM GÜNÜ ({} İŞ GÜNÜ) ÖZEL VADE TAHMİN KARTI", d, custom_res.trading_days),
+                    std::format("║  🎯 {}-CALENDAR-DAY ({}-TRADING-DAY) CUSTOM HORIZON CARD", d, custom_res.trading_days),
+                    std::format("║  🎯 {}-KALENDERTAGE ({}-HANDELSTAGE) SPEZIAL-PROGNOSE", d, custom_res.trading_days)
+                );
+                int cpad = std::max(0, 79 - ThemeEngine::utf8_visible_length(card_hdr));
                 std::cout << "\n" << pal.glow_rgb;
                 std::cout << "╔══════════════════════════════════════════════════════════════════════════════╗\n";
-                std::string card_hdr = I18n::tr(
-                    std::format("║  🎯 {} GÜNLÜK ÖZEL VADE TAHMİN KARTI:{:>41}║", d, " "),
-                    std::format("║  🎯 {}-DAY CUSTOM FORECAST HORIZON CARD:{:>38}║", d, " "),
-                    std::format("║  🎯 {}-TAGE SPEZIAL-ZEITHORIZONT-PROGNOSE:{:>35}║", d, " ")
-                );
-                std::cout << card_hdr << "\n";
+                std::cout << card_hdr << std::string(static_cast<size_t>(cpad), ' ') << "║\n";
                 std::cout << "╠══════════════════════════════════════════════════════════════════════════════╣\n";
                 std::cout << pal.reset_code;
                 std::cout << std::format("   • {:<24}: {}{}{}\n", I18n::tr("Tahmini Yön Durumu", "Direction Outlook", "Trend-Prognose"), pal.glow_rgb, custom_res.direction_label, pal.reset_code);
@@ -260,106 +309,132 @@ void run_chart_interactive(LiveMarketDataClient& client) {
     auto& te = ThemeEngine::instance();
     const auto& pal = te.palette();
     std::cout << "\n" << pal.glow_rgb
-              << I18n::tr("--- [G] TERMINAL MUM GRAFIK MOTORU ---",
+              << I18n::tr("--- [G] TERMINAL MUM GRAFİK MOTORU ---",
                           "--- [G] TERMINAL CANDLESTICK CHART ENGINE ---",
                           "--- [G] TERMINAL-KERZENCHART-ENGINE ---")
               << pal.reset_code << "\n";
-    std::cout << I18n::tr("Grafik için sembol girin (örn: SPY, AAPL, MSFT, NVDA, BTC-USD, THYAO.IS) [Default: SPY]: ",
-                          "Enter symbol for chart (e.g., SPY, AAPL, MSFT, NVDA, BTC-USD, THYAO.IS) [Default: SPY]: ",
-                          "Symbol für Chart eingeben (z.B. SPY, AAPL, MSFT, NVDA, BTC-USD, THYAO.IS) [Default: SPY]: ");
+    std::cout << I18n::tr("Grafik için sembol girin (örn: SPY, AAPL, NVDA, GRAM-ALTIN, THYAO.IS) [Default: SPY]: ",
+                          "Enter symbol for chart (e.g., SPY, AAPL, NVDA, GRAM-ALTIN, THYAO.IS) [Default: SPY]: ",
+                          "Symbol für Chart eingeben (z.B. SPY, AAPL, NVDA, GRAM-ALTIN, THYAO.IS) [Default: SPY]: ");
     std::string sym;
     std::getline(std::cin, sym);
     if (sym.empty()) sym = "SPY";
+    sym = LiveMarketDataClient::normalize_symbol(sym);
 
     std::cout << I18n::tr(std::format("Piyasa verileri alınıyor ({})... ", sym),
                           std::format("Fetching market data ({})... ", sym),
                           std::format("Marktdaten werden geladen ({})... ", sym))
               << std::flush;
-    auto data = client.fetch_asset(sym, "1mo");
+    auto data = client.fetch_asset(sym, "6mo");
+    if (data.current_price <= 0.0 || data.historical_prices.empty()) {
+        std::cout << pal.red_rgb << "\n  ❌ Geçerli fiyat serisi bulunamadı!\n" << pal.reset_code;
+        return;
+    }
+    auto fund = FundamentalEngine::fetch_fundamentals(client, data);
+    auto curve = client.fetch_treasury_yields();
     std::cout << pal.green_rgb << I18n::tr("TAMAMLANDI!\n", "COMPLETED!\n", "ABGESCHLOSSEN!\n") << pal.reset_code;
 
-    TerminalChartEngine::render(sym, data.historical_prices, data.historical_volumes, 12, 28);
+    TerminalChartEngine::render_asset(data, 12, 28);
+    FundamentalEngine::render_fundamental_card(fund, data, &curve);
 }
 
 void run_live_data_interactive(LiveMarketDataClient& client) {
     auto& te = ThemeEngine::instance();
     const auto& pal = te.palette();
     std::cout << "\n" << pal.glow_rgb
-              << I18n::tr("--- [1] CANLI PIYASA & VERI YÖNETICISI ---",
-                          "--- [1] LIVE MARKET & DATA MANAGER ---",
-                          "--- [1] LIVE-MARKT & DATEN-MANAGER ---")
+              << I18n::tr("--- [1] CANLI PİYASA, OHLCV ANALİTİĞİ & TEMEL VERİ YÖNETİCİSİ ---",
+                          "--- [1] LIVE MARKET, OHLCV ANALYTICS & FUNDAMENTAL DATA MANAGER ---",
+                          "--- [1] LIVE-MARKT, OHLCV-ANALYTIK & FUNDAMENTALDATEN-MANAGER ---")
               << pal.reset_code << "\n";
-    std::cout << I18n::tr("Sembol girin (örn: SPY, AAPL, MSFT, BTC-USD, THYAO.IS) [Default: SPY]: ",
-                          "Enter symbol (e.g., SPY, AAPL, MSFT, BTC-USD, THYAO.IS) [Default: SPY]: ",
-                          "Symbol eingeben (z.B. SPY, AAPL, MSFT, BTC-USD, THYAO.IS) [Default: SPY]: ");
+    std::cout << I18n::tr("Sembol girin (örn: SPY, AAPL, THYAO.IS, ASTOR.IS, GRAM-ALTIN, BTC-USD) [Default: SPY]: ",
+                          "Enter symbol (e.g., SPY, AAPL, THYAO.IS, ASTOR.IS, GRAM-ALTIN, BTC-USD) [Default: SPY]: ",
+                          "Symbol eingeben (z.B. SPY, AAPL, THYAO.IS, GRAM-ALTIN, BTC-USD) [Default: SPY]: ");
     std::string sym;
     std::getline(std::cin, sym);
     if (sym.empty()) sym = "SPY";
+    sym = LiveMarketDataClient::normalize_symbol(sym);
 
-    std::cout << I18n::tr(std::format("Canlı REST API çağrısı yapılıyor: {}... ", sym),
-                          std::format("Making live REST API call: {}... ", sym),
-                          std::format("Live-REST-API-Aufruf: {}... ", sym))
+    std::cout << I18n::tr(std::format("Canlı REST API & Bilanço sorgusu yapılıyor: {}... ", sym),
+                          std::format("Querying live REST API & Fundamentals: {}... ", sym),
+                          std::format("Live-REST-API & Bilanzdaten werden geladen: {}... ", sym))
               << std::flush;
-    auto data = client.fetch_asset(sym, "1mo");
+    auto data = client.fetch_asset(sym, "6mo");
+    if (data.current_price <= 0.0) {
+        std::cout << pal.red_rgb << "\n  ❌ Sembol bulunamadı!\n" << pal.reset_code;
+        return;
+    }
+    auto fund = FundamentalEngine::fetch_fundamentals(client, data);
+    auto curve = client.fetch_treasury_yields();
     std::cout << pal.green_rgb << "OK!\n" << pal.reset_code;
 
     std::vector<std::string> lines = {
-        std::format("{:<26}: {}{}{}", I18n::tr("Varlık Sembolü", "Asset Symbol", "Anlagesymbol"), pal.glow_rgb, data.symbol, pal.reset_code),
+        std::format("{:<26}: {}{}{} ({})", I18n::tr("Varlık Sembolü", "Asset Symbol", "Anlagesymbol"),
+                    pal.glow_rgb, data.symbol, pal.reset_code, data.long_name.empty() ? data.instrument_type : data.long_name),
         std::format("{:<26}: {}", I18n::tr("Veri Akış Durumu", "Data Stream State", "Datenstrom-Status"),
-                    data.is_live ? (pal.green_rgb + I18n::tr("CANLI PIYASA AKISI AKTIF", "LIVE MARKET FEED ACTIVE", "LIVE-MARKTFEED AKTIV") + pal.reset_code) :
-                                   (pal.dim_rgb + I18n::tr("SIMULASYON", "SIMULATION", "SIMULATION") + pal.reset_code)),
-        std::format("{:<26}: {}${:.2f}{}", I18n::tr("Anlık Spot Fiyat", "Current Spot Price", "Aktueller Kassakurs"), pal.glow_rgb, data.current_price, pal.reset_code),
-        std::format("{:<26}: ${:.2f} (std::inner_product & std::accumulate)", I18n::tr("1-Aylık Tarihsel VWAP", "1-Month Historical VWAP", "1-Monats-VWAP"), data.vwap),
-        std::format("{:<26}: {:.2f}% (std::adjacent_difference log-returns)", I18n::tr("Yıllıklandırılmış Oynaklık", "Annualized Volatility", "Annualisierte Volatilität"), data.annualized_volatility * 100.0),
-        std::format("{:<26}: {} {}", I18n::tr("Kaydedilen Fiyat Barı", "Recorded Price Bars", "Erfasste Kursbalken"), data.historical_prices.size(), I18n::tr("gün", "days", "Tage"))
+                    data.is_live ? (pal.green_rgb + I18n::tr("CANLI PİYASA AKIŞI AKTİF", "LIVE MARKET FEED ACTIVE", "LIVE-MARKTFEED AKTIV") + pal.reset_code) :
+                                   (pal.red_rgb + I18n::tr("ÇEVRİMDIŞI SİMÜLASYON", "OFFLINE SIMULATION", "OFFLINE-SIMULATION") + pal.reset_code)),
+        std::format("{:<26}: {}{:.2f} {}{}", I18n::tr("Anlık Spot Fiyat", "Current Spot Price", "Aktueller Kassakurs"),
+                    pal.glow_rgb, data.current_price, data.currency_display, pal.reset_code),
+        std::format("{:<26}: {:.2f} {} (Tipik Fiyat HLC/3 × Hacim)", I18n::tr("22-İşG Kurumsal VWAP", "22-Day Institutional VWAP", "22-Tage-VWAP"),
+                    data.vwap, data.currency_display),
+        std::format("{:<26}: {:.2f}% (EWMA λ=0.94: {:.2f}% │ Örneklem: {:.2f}%)",
+                    I18n::tr("Yıllıklandırılmış Vol.", "Annualized Volatility", "Annualisierte Volatilität"),
+                    data.annualized_volatility * 100.0, data.ewma_volatility * 100.0, data.sample_volatility * 100.0),
+        std::format("{:<26}: {:.2f} {}  │  Senkronize OHLCV Barı: {} gün",
+                    I18n::tr("14-Gün Wilder OHLC ATR", "14-Day Wilder OHLC ATR", "14-Tage-ATR"),
+                    data.atr_14, data.currency_display, data.historical_prices.size())
     };
 
-    te.print_box(I18n::tr("PIYASA OZETI", "MARKET SUMMARY", "MARKTÜBERSICHT"), lines);
+    te.print_box(I18n::tr("PİYASA & MİKROYAPI ÖZETİ", "MARKET & MICROSTRUCTURE SUMMARY", "MARKT- & MIKROSTRUKTUR-ÜBERSICHT"), lines);
+
+    // Render Fundamental / FAVÖK (or Commodity/ETF Macro) Additional Card
+    FundamentalEngine::render_fundamental_card(fund, data, &curve);
 
     // US Treasury Yields
     std::cout << "\n";
-    auto curve = client.fetch_treasury_yields();
+    std::string yc_status = curve.is_live ? "[CANLI]" : "[VARSAYILAN]";
     std::vector<std::string> yc_lines = {
-        std::format("{}: {:.3f}%", I18n::tr("3-Ay Hazine Bonosu (^IRX)", "3-Month T-Bill (^IRX)", "3-Monats T-Bill (^IRX)"), curve.three_month_yield * 100.0),
+        std::format("{}: {:.3f}% {}", I18n::tr("3-Ay Hazine Bonosu (^IRX)", "3-Month T-Bill (^IRX)", "3-Monats T-Bill (^IRX)"), curve.three_month_yield * 100.0, yc_status),
         std::format("{}: {:.3f}%", I18n::tr("5-Yıl Hazine Tahvili (^FVX)", "5-Year T-Note (^FVX)", "5-Jahres T-Note (^FVX)"), curve.five_year_yield * 100.0),
         std::format("{}: {:.3f}%", I18n::tr("10-Yıl Gösterge Tahvil (^TNX)", "10-Year Benchmark (^TNX)", "10-Jahres Benchmark (^TNX)"), curve.ten_year_yield * 100.0),
         std::format("{}: {:.3f}%", I18n::tr("30-Yıl Uzun Vade (^TYX)", "30-Year Long Bond (^TYX)", "30-Jahres Long Bond (^TYX)"), curve.thirty_year_yield * 100.0)
     };
-    te.print_box(I18n::tr("ABD HAZINE SIFIR KUPON EGRI ORANLARI", "US TREASURY ZERO-COUPON YIELD CURVE", "US-TREASURY NULLKUPON-ZINSKURVE"), yc_lines);
+    te.print_box(I18n::tr("ABD HAZİNE GETİRİ EĞRİSİ ORANLARI", "US TREASURY YIELD CURVE RATES", "US-TREASURY ZINSKURVE"), yc_lines);
 }
 
 void run_backtest_interactive(LiveMarketDataClient& client) {
     auto& te = ThemeEngine::instance();
     const auto& pal = te.palette();
     std::cout << "\n" << pal.glow_rgb
-              << I18n::tr("--- [2] ALGORITMIK BACKTEST & OPTIMIZASYON MOTORU ---",
-                          "--- [2] ALGORITHMIC BACKTEST & OPTIMIZATION ENGINE ---",
-                          "--- [2] ALGORITHMISCHER BACKTEST & OPTIMIERUNG ---")
+              << I18n::tr("--- [2] ALGORİTMİK BACKTEST & WALK-FORWARD DOĞRULAMA MOTORU ---",
+                          "--- [2] ALGORITHMIC BACKTEST & WALK-FORWARD VALIDATION ENGINE ---",
+                          "--- [2] ALGORITHMISCHER BACKTEST & WALK-FORWARD-VALIDIERUNG ---")
               << pal.reset_code << "\n";
-    std::cout << I18n::tr("Backtest için sembol (örn: THYAO.IS, SPY, NVDA, AAPL, RHM.DE) [Default: THYAO.IS]: ",
-                          "Enter symbol for backtest (e.g., THYAO.IS, SPY, NVDA, AAPL, RHM.DE) [Default: THYAO.IS]: ",
+    std::cout << I18n::tr("Backtest için sembol (örn: THYAO.IS, SPY, NVDA, AAPL, RHM.DE, GRAM-ALTIN) [Default: THYAO.IS]: ",
+                          "Enter symbol for backtest (e.g., THYAO.IS, SPY, NVDA, AAPL, RHM.DE, GRAM-ALTIN) [Default: THYAO.IS]: ",
                           "Symbol für Backtest eingeben (z.B. THYAO.IS, SPY, NVDA, AAPL, RHM.DE) [Default: THYAO.IS]: ");
     std::string sym;
     std::getline(std::cin, sym);
     if (sym.empty()) sym = "THYAO.IS";
+    sym = LiveMarketDataClient::normalize_symbol(sym);
 
     std::cout << I18n::tr(
         "\nBacktest Modeli / Strateji Türü Seçin:\n"
-        "  [1] 🎯 Quant Forecast Engine Walk-Forward Doğrulama (1-Yıllık Canlı İsabet & Hedef Analizi)\n"
+        "  [1] 🎯 Quant Forecast Engine Walk-Forward Doğrulama (2-Yıllık Out-of-Sample Kalibrasyon & Komisyonlu PnL)\n"
         "  [2] Dual SMA Kesişimi (5 / 20 Gün)\n"
         "  [3] Bollinger Bantları Ortalamaya Dönüş (20 Gün, 2.0 Std)\n"
         "  [4] RSI Momentum (14 Gün, 30/70 Sınırları)\n"
         "Seçiminiz [1]: ",
 
         "\nSelect Backtest Model / Strategy Type:\n"
-        "  [1] 🎯 Quant Forecast Engine Walk-Forward Verification (1-Year Accuracy & Targets)\n"
+        "  [1] 🎯 Quant Forecast Engine Walk-Forward Validation (2-Year Out-of-Sample Calibration & Net PnL)\n"
         "  [2] Dual SMA Crossover (5 / 20 Days)\n"
         "  [3] Bollinger Bands Mean Reversion (20 Days, 2.0 Std)\n"
         "  [4] RSI Momentum (14 Days, 30/70 Bounds)\n"
         "Your Choice [1]: ",
 
         "\nBacktest-Modell / Strategietyp wählen:\n"
-        "  [1] 🎯 Quant Forecast Engine Walk-Forward Verifikation (1-Jahres-Trefferquote & Ziele)\n"
+        "  [1] 🎯 Quant Forecast Engine Walk-Forward-Validierung (2-Jahres Out-of-Sample & Netto-PnL)\n"
         "  [2] Dual-SMA-Kreuzung (5 / 20 Tage)\n"
         "  [3] Bollinger-Bänder Mean-Reversion (20 Tage, 2.0 Std)\n"
         "  [4] RSI Momentum (14 Tage, 30/70 Schwellen)\n"
@@ -373,41 +448,47 @@ void run_backtest_interactive(LiveMarketDataClient& client) {
             "\nTahmin Ufku / Vade Seçin:\n"
             "  [1] 1 Hafta (5 İş Günü - Kısa Vade)\n"
             "  [2] 2 Hafta (10 İş Günü)\n"
-            "  [3] 1 Ay    (20 İş Günü - Orta Vade)\n"
+            "  [3] 1 Ay    (21 İş Günü - Orta Vade)\n"
             "Seçiminiz [1]: ",
 
             "\nSelect Forecast Horizon / Period:\n"
             "  [1] 1 Week  (5 Trading Days - Short-Term)\n"
             "  [2] 2 Weeks (10 Trading Days)\n"
-            "  [3] 1 Month (20 Trading Days - Mid-Term)\n"
+            "  [3] 1 Month (21 Trading Days - Mid-Term)\n"
             "Your Choice [1]: ",
 
             "\nPrognosehorizont / Zeitraum wählen:\n"
             "  [1] 1 Woche  (5 Handelstage - Kurzfristig)\n"
             "  [2] 2 Wochen (10 Handelstage)\n"
-            "  [3] 1 Monat  (20 Handelstage - Mittelfristig)\n"
+            "  [3] 1 Monat  (21 Handelstage - Mittelfristig)\n"
             "Ihre Auswahl [1]: "
         );
         std::string h_choice;
         std::getline(std::cin, h_choice);
         int horizon = 5;
         if (h_choice == "2") horizon = 10;
-        else if (h_choice == "3") horizon = 20;
+        else if (h_choice == "3") horizon = 21;
 
         std::cout << I18n::tr(
-            std::format("\n'{}' için 1-Yıllık tarihsel pencereler taranıyor ve out-of-sample doğrulama yapılıyor...\n", sym),
-            std::format("\nScanning 1-year historical rolling windows and running out-of-sample verification for '{}'...\n", sym),
-            std::format("\n1-Jahres-Vergangenheitsfenster werden durchsucht und Out-of-Sample-Validierung für '{}' durchgeführt...\n", sym)
+            std::format("\n'{}' için 2-Yıllık tarihsel pencereler taranıyor ve birebir canlı motorla out-of-sample doğrulama yapılıyor...\n", sym),
+            std::format("\nScanning 2-year historical rolling windows and running exact out-of-sample validation for '{}'...\n", sym),
+            std::format("\n2-Jahres-Vergangenheitsfenster werden für '{}' out-of-sample validiert...\n", sym)
         );
-        auto rep = ForecastBacktestEngine::run_walk_forward_backtest(client, sym, horizon, "1y");
+        auto rep = ForecastBacktestEngine::run_walk_forward_backtest(client, sym, horizon, "2y");
         ForecastBacktestEngine::render_backtest_report(rep);
+        auto snap = client.fetch_asset(sym, "6mo");
+        if (snap.current_price > 0.0) {
+            auto fund = FundamentalEngine::fetch_fundamentals(client, snap);
+            auto curve = client.fetch_treasury_yields();
+            FundamentalEngine::render_fundamental_card(fund, snap, &curve);
+        }
         return;
     }
 
-    auto data = client.fetch_asset(sym, "1y");
+    auto data = client.fetch_asset(sym, "2y");
     if (data.historical_prices.size() < 25) {
-        std::cout << pal.dim_rgb << I18n::tr("Uzun seri alınıyor...", "Fetching longer series...", "Längere Serie wird geladen...") << pal.reset_code << "\n";
-        data = client.fetch_asset(sym, "6mo");
+        std::cout << pal.dim_rgb << I18n::tr("Alternatif seri alınıyor...", "Fetching fallback series...", "Alternativserie wird geladen...") << pal.reset_code << "\n";
+        data = client.fetch_asset(sym, "1y");
     }
 
     StrategyType st = StrategyType::SmaCrossover;
@@ -426,6 +507,12 @@ void run_backtest_interactive(LiveMarketDataClient& client) {
         std::format("{:<26}: {:.1f}%", I18n::tr("Kazanma Oranı (Win Rate)", "Win Rate", "Gewinnquote (Win Rate)"), res.win_rate_pct)
     };
     te.print_box(I18n::tr("BACKTEST RAPORU", "BACKTEST REPORT", "BACKTEST-BERICHT"), lines);
+
+    if (data.current_price > 0.0) {
+        auto fund = FundamentalEngine::fetch_fundamentals(client, data);
+        auto curve = client.fetch_treasury_yields();
+        FundamentalEngine::render_fundamental_card(fund, data, &curve);
+    }
 }
 
 void run_live_signals_interactive() {
@@ -647,21 +734,33 @@ void run_pairs_trading_module(LiveMarketDataClient& client) {
     std::string b_sym; std::getline(std::cin, b_sym);
     if (b_sym.empty()) b_sym = "QQQ";
 
-    auto a_data = client.fetch_asset(a_sym, "3mo");
-    auto b_data = client.fetch_asset(b_sym, "3mo");
+    a_sym = LiveMarketDataClient::normalize_symbol(a_sym);
+    b_sym = LiveMarketDataClient::normalize_symbol(b_sym);
 
-    auto res = PairsTradingEngine::analyze(a_sym, b_sym, a_data.historical_prices, b_data.historical_prices);
+    auto a_data = client.fetch_asset(a_sym, "6mo");
+    auto b_data = client.fetch_asset(b_sym, "6mo");
+    auto a_fund = FundamentalEngine::fetch_fundamentals(client, a_data);
+    auto b_fund = FundamentalEngine::fetch_fundamentals(client, b_data);
+
+    auto res = PairsTradingEngine::analyze_aligned(a_data, b_data);
+    std::string ccy = a_data.currency_display.empty()
+        ? LiveMarketDataClient::currency_display_for(LiveMarketDataClient::infer_currency_code(a_sym), a_sym)
+        : a_data.currency_display;
 
     std::vector<std::string> lines = {
         std::format("Parite:                  {}{}{}", pal.glow_rgb, res.pair_name, pal.reset_code),
+        std::format("Eşleşen Ortak İş Günü:   {} gün  │  Korelasyon (ρ): {:.3f}", res.aligned_days, res.correlation),
         std::format("Hedge Oranı (Beta):      {:.4f}", res.hedge_ratio),
-        std::format("Mevcut Spread Değeri:    ${:.2f}", res.current_spread),
-        std::format("Spread Ortalaması (μ):   ${:.2f} (σ = ${:.2f})", res.spread_mean, res.spread_std),
-        std::format("Güncel Spread Z-Score:   {}{:.2f}{}", pal.glow_rgb, res.current_zscore, pal.reset_code),
-        std::format("Ortalamaya Dönüş Yarılanma Ömrü (Half-Life): {:.1f} gün", res.half_life_days),
-        std::format("Algoritmik Sinyal:       {}{}{}", pal.glow_rgb, res.signal, pal.reset_code)
+        std::format("Mevcut Spread Değeri:    {:.2f} {}", res.current_spread, ccy),
+        std::format("Spread Ortalaması (μ):   {:.2f} {} (σ = {:.2f} {})", res.spread_mean, ccy, res.spread_std, ccy),
+        std::format("Güncel Spread Z-Score:   {}{:+.2f}{}", pal.glow_rgb, res.current_zscore, pal.reset_code),
+        std::format("OU Ortalamaya Dönüş Yarılanma Ömrü (Half-Life): {:.1f} gün", res.half_life_days),
+        std::format("Algoritmik Sinyal:       {}{}{}", pal.glow_rgb, res.signal, pal.reset_code),
+        "────────────────────────────────────────────────────────────────────────",
+        std::format("{} Temel/FAVÖK: {}", a_data.symbol, a_fund.summary_line),
+        std::format("{} Temel/FAVÖK: {}", b_data.symbol, b_fund.summary_line)
     };
-    te.print_box("STAT ARB PAIRS TRADING", lines);
+    te.print_box("STAT ARB PAIRS TRADING & FAVÖK KARŞILAŞTIRMASI", lines);
 }
 
 void run_drawdown_module() {
@@ -736,13 +835,13 @@ void run_copilot_interactive(LiveMarketDataClient& client) {
                           "--- [C] KI-QUANT-TRADING-COPILOT ---")
               << pal.reset_code << "\n";
     std::cout << I18n::tr(
-        "Sorunuzu veya komutunuzu yazın (örn: 'SPY analiz et', 'hazine faizleri', 'opsiyon fiyatla')\n"
+        "Sorunuzu veya komutunuzu yazın (örn: 'THYAO favök ve hedef fiyat', 'GRAM-ALTIN analiz', 'SPY backtest', 'hazine faizleri')\n"
         "[Ana menüye dönmek için boş bırakıp Enter'a basın]:\n",
 
-        "Type your question or prompt (e.g. 'analyze SPY', 'treasury yields', 'price option')\n"
+        "Type your question or prompt (e.g. 'THYAO ebitda and forecast', 'analyze GC=F', 'SPY backtest', 'treasury yields')\n"
         "[Press Enter with an empty line to return to main menu]:\n",
 
-        "Geben Sie Ihre Frage oder Eingabe ein (z.B. 'SPY analyse', 'Zinsen', 'Option bewerten')\n"
+        "Geben Sie Ihre Frage oder Eingabe ein (z.B. 'SAP.DE EBITDA und Ziel', 'GC=F Analyse', 'Zinsen')\n"
         "[Leerzeile eingeben und Enter drücken für Hauptmenü]:\n"
     );
     std::cout << pal.glow_rgb << "quant@unix:~$ " << pal.reset_code;
@@ -928,7 +1027,6 @@ void run_investment_advisor_interactive(LiveMarketDataClient& client) {
 
 void print_about_info() {
     auto& te = ThemeEngine::instance();
-    const auto& pal = te.palette();
     std::vector<std::string> lines = {
         I18n::tr("Uygulama: Modern C++ Algorithmic & Quantitative Trading Terminal v2.0",
                  "Application: Modern C++ Algorithmic & Quantitative Trading Terminal v2.0",
@@ -995,10 +1093,13 @@ int main(int argc, char* argv[]) {
         print_menu();
         std::string line;
         if (!std::getline(std::cin, line)) break;
+        if (line.starts_with("\xEF\xBB\xBF")) line.erase(0, 3);
+        while (!line.empty() && (line.front() == ' ' || line.front() == '\t' || line.front() == '\r')) line.erase(line.begin());
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r')) line.pop_back();
         if (line.empty()) continue;
 
         std::string choice = line;
-        std::transform(choice.begin(), choice.end(), choice.begin(), ::toupper);
+        std::transform(choice.begin(), choice.end(), choice.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
 
         if (choice == "0") {
             std::cout << "\n\033[1;32m" << I18n::exit_message() << "\033[0m\n\n";
