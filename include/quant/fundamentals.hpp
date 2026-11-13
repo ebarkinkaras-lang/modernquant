@@ -140,18 +140,77 @@ struct FundamentalProfile {
 
 class FundamentalEngine {
 public:
+    static constexpr std::chrono::minutes kFundamentalCacheTtl{15};
+
+    struct CachedRawFundamentals {
+        RawFundamentalInputs raw;
+        AssetClassType asset_class{AssetClassType::Equity};
+        bool ts_ok{false};
+        bool qs_ok{false};
+        long ts_http{0};
+        long qs_http{0};
+        std::string ts_err;
+        std::string qs_err;
+        std::chrono::steady_clock::time_point fetched_at{};
+    };
+
+    static std::unordered_map<std::string, CachedRawFundamentals>& cache_store_() {
+        static std::unordered_map<std::string, CachedRawFundamentals> cache;
+        return cache;
+    }
+
+    static void clear_cache() {
+        cache_store_().clear();
+    }
+
     static FundamentalProfile fetch_fundamentals(LiveMarketDataClient& client,
-                                                 const RealTimeAssetData& asset) {
-        static std::unordered_map<std::string, FundamentalProfile> cache;
+                                                 const RealTimeAssetData& asset,
+                                                 bool force_refresh = false) {
+        auto& cache = cache_store_();
         std::string key = asset.symbol;
-        if (auto it = cache.find(key); it != cache.end()) {
-            return it->second;
+        const auto now_steady = std::chrono::steady_clock::now();
+
+        if (!force_refresh) {
+            if (auto it = cache.find(key); it != cache.end()) {
+                if ((now_steady - it->second.fetched_at) < kFundamentalCacheTtl) {
+                    if (it->second.asset_class != AssetClassType::Equity &&
+                        it->second.asset_class != AssetClassType::BankOrFinancial) {
+                        return build_non_equity_profile(asset, it->second.asset_class);
+                    }
+                    DataQualityTelemetry::record_fetch(
+                        "Yahoo v1 Fundamentals-TS",
+                        "query2.finance.yahoo.com/ws/fundamentals-timeseries/v1",
+                        it->second.ts_ok,
+                        std::chrono::milliseconds(0),
+                        true,
+                        it->second.ts_ok ? "" : it->second.ts_err,
+                        it->second.ts_http > 0 ? it->second.ts_http : (it->second.ts_ok ? 200 : 0)
+                    );
+                    DataQualityTelemetry::record_fetch(
+                        "Yahoo v10 QuoteSummary",
+                        "query2.finance.yahoo.com/v10/finance/quoteSummary",
+                        it->second.qs_ok,
+                        std::chrono::milliseconds(0),
+                        true,
+                        it->second.qs_ok ? "" : it->second.qs_err,
+                        it->second.qs_http > 0 ? it->second.qs_http : (it->second.qs_ok ? 200 : 0)
+                    );
+                    // Recompute valuation multiples with latest live spot price & fresh FX rate
+                    RawFundamentalInputs live_raw = it->second.raw;
+                    if (asset.current_price > 0.0) live_raw.spot_price = asset.current_price;
+                    live_raw.fx_fin_to_trade = client.get_fx_rate(live_raw.financial_currency, live_raw.trading_currency);
+                    return compute_from_raw(live_raw);
+                }
+            }
         }
 
         AssetClassType cls = classify_asset_type(asset);
         if (cls != AssetClassType::Equity && cls != AssetClassType::BankOrFinancial) {
             FundamentalProfile non_eq = build_non_equity_profile(asset, cls);
-            cache[key] = non_eq;
+            CachedRawFundamentals entry;
+            entry.asset_class = cls;
+            entry.fetched_at = now_steady;
+            cache[key] = std::move(entry);
             return non_eq;
         }
 
@@ -183,21 +242,56 @@ public:
             LiveMarketDataClient::url_encode(asset.symbol), ts_types, period1, period2
         );
 
-        std::string ts_resp = client.http_get(ts_url);
+        long ts_http = 0;
+        std::string ts_err;
+        auto ts_t0 = std::chrono::steady_clock::now();
+        std::string ts_resp = client.http_get(ts_url, &ts_http, &ts_err);
+        auto ts_lat = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - ts_t0);
         bool ts_ok = false;
         if (!ts_resp.empty()) {
             ts_ok = parse_timeseries_json_(ts_resp, raw);
+            if (!ts_ok && ts_err.empty()) ts_err = "Empty/error timeseries payload";
+        } else if (ts_err.empty()) {
+            ts_err = "Empty response";
         }
+        DataQualityTelemetry::record_fetch(
+            "Yahoo v1 Fundamentals-TS",
+            "query2.finance.yahoo.com/ws/fundamentals-timeseries/v1",
+            ts_ok,
+            ts_lat,
+            false,
+            ts_ok ? "" : ts_err,
+            ts_http > 0 ? ts_http : (ts_ok ? 200 : 0)
+        );
 
         // 2. Secondary Enrichment: Yahoo quoteSummary v10 (sector, industry, forwardPE, dividendYield, fallback mcap)
         std::string qs_url = std::format(
             "https://query2.finance.yahoo.com/v10/finance/quoteSummary/{}?modules=summaryDetail,defaultKeyStatistics,financialData,assetProfile,quoteType",
             LiveMarketDataClient::url_encode(asset.symbol)
         );
-        std::string qs_resp = client.http_get_yahoo_crumb(qs_url);
+        long qs_http = 0;
+        std::string qs_err;
+        auto qs_t0 = std::chrono::steady_clock::now();
+        std::string qs_resp = client.http_get_yahoo_crumb(qs_url, &qs_http, &qs_err);
+        auto qs_lat = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - qs_t0);
+        bool qs_ok = false;
         if (!qs_resp.empty()) {
-            parse_quote_summary_json_(qs_resp, raw, ts_ok);
+            qs_ok = parse_quote_summary_json_(qs_resp, raw, ts_ok);
+            if (!qs_ok && qs_err.empty()) qs_err = "Empty/error quoteSummary payload";
+        } else if (qs_err.empty()) {
+            qs_err = "Empty response";
         }
+        DataQualityTelemetry::record_fetch(
+            "Yahoo v10 QuoteSummary",
+            "query2.finance.yahoo.com/v10/finance/quoteSummary",
+            qs_ok,
+            qs_lat,
+            false,
+            qs_ok ? "" : qs_err,
+            qs_http > 0 ? qs_http : (qs_ok ? 200 : 0)
+        );
 
         // Re-check bank/financial classification after industry/sector enrichment
         if (is_bank_or_financial_(raw.symbol, raw.sector, raw.industry, raw)) {
@@ -209,7 +303,17 @@ public:
 
         FundamentalProfile prof = compute_from_raw(raw);
         if (prof.is_available) {
-            cache[key] = prof;
+            CachedRawFundamentals entry;
+            entry.raw = raw;
+            entry.asset_class = raw.asset_class;
+            entry.ts_ok = ts_ok;
+            entry.qs_ok = qs_ok;
+            entry.ts_http = ts_http;
+            entry.qs_http = qs_http;
+            entry.ts_err = ts_err;
+            entry.qs_err = qs_err;
+            entry.fetched_at = std::chrono::steady_clock::now();
+            cache[key] = std::move(entry);
         }
         return prof;
     }
@@ -671,6 +775,10 @@ private:
 
         auto ts_it = root.as_object().find("timeseries");
         if (ts_it == root.as_object().end() || !ts_it->value().is_object()) return false;
+        if (auto err_it = ts_it->value().as_object().find("error");
+            err_it != ts_it->value().as_object().end() && !err_it->value().is_null()) {
+            return false;
+        }
         auto res_it = ts_it->value().as_object().find("result");
         if (res_it == ts_it->value().as_object().end() || !res_it->value().is_array()) return false;
 
@@ -834,16 +942,20 @@ private:
         return true;
     }
 
-    static void parse_quote_summary_json_(const std::string& json_str, RawFundamentalInputs& raw, bool ts_already_loaded) {
+    static bool parse_quote_summary_json_(const std::string& json_str, RawFundamentalInputs& raw, bool ts_already_loaded) {
         boost::system::error_code ec;
         boost::json::value root = boost::json::parse(json_str, ec);
-        if (ec || !root.is_object()) return;
+        if (ec || !root.is_object()) return false;
 
         auto qs_it = root.as_object().find("quoteSummary");
-        if (qs_it == root.as_object().end() || !qs_it->value().is_object()) return;
+        if (qs_it == root.as_object().end() || !qs_it->value().is_object()) return false;
+        if (auto err_it = qs_it->value().as_object().find("error");
+            err_it != qs_it->value().as_object().end() && !err_it->value().is_null()) {
+            return false;
+        }
         auto res_it = qs_it->value().as_object().find("result");
-        if (res_it == qs_it->value().as_object().end() || !res_it->value().is_array() || res_it->value().as_array().empty()) return;
-        if (!res_it->value().as_array()[0].is_object()) return;
+        if (res_it == qs_it->value().as_object().end() || !res_it->value().is_array() || res_it->value().as_array().empty()) return false;
+        if (!res_it->value().as_array()[0].is_object()) return false;
         const auto& r0 = res_it->value().as_array()[0].as_object();
 
         auto raw_num = [](const boost::json::object& obj, std::string_view key, double& out) -> bool {
@@ -910,6 +1022,7 @@ private:
                 if (!raw.has_cash && raw_num(fd, "totalCash", raw.cash_and_st_investments)) raw.has_cash = true;
             }
         }
+        return true;
     }
 
     static void score_and_summarize_(FundamentalProfile& p, const RawFundamentalInputs& raw) {

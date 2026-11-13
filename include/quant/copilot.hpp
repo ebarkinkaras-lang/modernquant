@@ -8,12 +8,15 @@
 #include "forecast_engine.hpp"
 #include "forecast_backtest.hpp"
 #include "alpha_screener.hpp"
+#include "data_quality.hpp"
 #include "i18n.hpp"
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 #include <iostream>
 #include <algorithm>
+#include <cmath>
 #include <format>
 
 namespace quant {
@@ -145,12 +148,43 @@ public:
 
             if (lower_input.find("opsiyon") != std::string::npos || lower_input.find("option") != std::string::npos ||
                 lower_input.find("black") != std::string::npos) {
-                BlackScholes bs(100.0, 100.0, 0.5, PayoffType::Call, 0.045, 0.015);
-                double call_p = bs(0.20);
-                auto greeks = bs.risk_values(0.20);
-                std::cout << std::format("Analitik Black-Scholes Çekirdeği (S=100, K=100, T=0.5y, σ=20%, r=4.5%):\n"
-                                         "  • Call Primi: {:.4f}  │  Delta: {:.4f}  │  Gamma: {:.4f}  │  Vega: {:.4f}\n"
-                                         "  👉 Canlı varlık opsiyon fiyatlaması için ana menüden [4] seçiniz.\n",
+                auto spy = client.fetch_asset_smart("SPY", "6mo");
+                auto yc = client.fetch_treasury_yields();
+                DataQualityDashboard::record_asset_quality(spy);
+
+                double spot = (spy.current_price > 0.0) ? spy.current_price : 500.0;
+                double strike = std::round(spot);
+                double r = (yc.is_live && yc.three_month_yield > 0.0) ? yc.three_month_yield : 0.045;
+                double q = 0.013;
+                double sigma = 0.20;
+
+                if (spy.historical_prices.size() >= 22) {
+                    size_t start_idx = spy.historical_prices.size() - 21;
+                    std::vector<double> lrets;
+                    for (size_t i = start_idx; i < spy.historical_prices.size(); ++i) {
+                        if (spy.historical_prices[i - 1] > 0.0 && spy.historical_prices[i] > 0.0) {
+                            lrets.push_back(std::log(spy.historical_prices[i] / spy.historical_prices[i - 1]));
+                        }
+                    }
+                    if (lrets.size() >= 10) {
+                        double mean = 0.0;
+                        for (double x : lrets) mean += x;
+                        mean /= static_cast<double>(lrets.size());
+                        double var = 0.0;
+                        for (double x : lrets) var += (x - mean) * (x - mean);
+                        var /= static_cast<double>(lrets.size() - 1);
+                        sigma = std::clamp(std::sqrt(var * 252.0), 0.05, 1.50);
+                    }
+                }
+
+                BlackScholes bs(strike, spot, 0.5, PayoffType::Call, r, q);
+                double call_p = bs(sigma);
+                auto greeks = bs.risk_values(sigma);
+                std::cout << std::format("{} Analitik Black-Scholes ({} ATM: S=${:.2f}, K=${:.0f}, T=0.5y, \u03c3={:.1f}%, r={:.2f}%):\n"
+                                         "  • Call Primi: ${:.2f}  │  Delta: {:.4f}  │  Gamma: {:.4f}  │  Vega: {:.4f}\n"
+                                         "  👉 Detaylı varlık seçimi, vade ve Monte Carlo/Binom opsiyon fiyatlaması için [4] seçiniz.\n",
+                                         spy.is_live ? "🟢 CANLI" : "🟡 ÇEVRİMDIŞI", spy.symbol,
+                                         spot, strike, sigma * 100.0, r * 100.0,
                                          call_p, greeks[RiskValues::Delta], greeks[RiskValues::Gamma], greeks[RiskValues::Vega]);
                 return;
             }
@@ -226,25 +260,8 @@ public:
             std::format("Live-Markt- & Fundamental-Engine wird für '{}' abgefragt...\n", found_ticker)
         );
 
-        auto data = client.fetch_asset(found_ticker, "6mo");
-
-        // Smart exchange suffix fallback if bare symbol wasn't found on US exchanges
-        if ((!data.is_live || data.current_price <= 0.0) &&
-            found_ticker.find('.') == std::string::npos &&
-            found_ticker.find('-') == std::string::npos &&
-            found_ticker.find('=') == std::string::npos) {
-            auto bist_try = client.fetch_asset(found_ticker + ".IS", "6mo");
-            if (bist_try.is_live && bist_try.current_price > 0.0) {
-                data = std::move(bist_try);
-                found_ticker = data.symbol;
-            } else {
-                auto xetra_try = client.fetch_asset(found_ticker + ".DE", "6mo");
-                if (xetra_try.is_live && xetra_try.current_price > 0.0) {
-                    data = std::move(xetra_try);
-                    found_ticker = data.symbol;
-                }
-            }
-        }
+        auto data = client.fetch_asset_smart(found_ticker, "6mo");
+        found_ticker = data.symbol;
 
         if (data.current_price <= 0.0) {
             std::cout << I18n::tr(
@@ -259,9 +276,10 @@ public:
 
         auto sent = NewsSentimentEngine::get_asset_sentiment(data.symbol, data.long_name, client);
         auto fund = FundamentalEngine::fetch_fundamentals(client, data);
+        DataQualityDashboard::record_asset_quality(data, &fund);
         TreasuryYieldCurveData yc;
         bool has_yc = false;
-        if (fund.asset_class == AssetClassType::CommodityOrFuture) {
+        if (fund.asset_class == AssetClassType::CommodityOrFuture || data.currency_code == "USD") {
             yc = client.fetch_treasury_yields();
             has_yc = true;
         }
@@ -298,7 +316,8 @@ public:
 
         if (custom_days > 0) {
             auto custom_res = QuantForecastEngine::forecast_for_days(
-                data, sent.sentiment_score, custom_days, custom_vade_label, sent.has_live_news, &fund
+                data, sent.sentiment_score, custom_days, custom_vade_label, sent.has_live_news,
+                &fund, has_yc ? &yc : nullptr
             );
             std::string custom_hdr = I18n::tr(
                 std::format("║  🎯 TALEP ETTİĞİNİZ ÖZEL VADE TAHMİN KARTI: {}", custom_res.horizon_name),
@@ -430,12 +449,30 @@ private:
             if (stopwords.contains(lower_tok)) continue;
             if (tok.length() > 14) continue;
 
-            // Skip tokens containing non-ASCII bytes that weren't matched as known company names
+            // Handle Turkish-orthography tokens safely without matching Turkish prose words
             bool has_non_ascii = false;
             for (unsigned char b : tok) {
                 if (b >= 0x80) { has_non_ascii = true; break; }
             }
-            if (has_non_ascii) continue;
+            if (has_non_ascii) {
+                std::string folded = LiveMarketDataClient::normalize_symbol(tok);
+                if (folded.find(".IS") != std::string::npos || folded.find(".DE") != std::string::npos) {
+                    return folded;
+                }
+                static const std::unordered_map<std::string, std::string> kTrTickers = {
+                    {"ISCTR", "ISCTR.IS"}, {"SISE", "SISE.IS"}, {"TUPRS", "TUPRS.IS"},
+                    {"ARCLK", "ARCLK.IS"}, {"ULKER", "ULKER.IS"}, {"CIMSA", "CIMSA.IS"},
+                    {"GUBRF", "GUBRF.IS"}, {"GOLTS", "GOLTS.IS"}, {"ISGYO", "ISGYO.IS"},
+                    {"ISMEN", "ISMEN.IS"}, {"ISFIN", "ISFIN.IS"}, {"ISYAT", "ISYAT.IS"},
+                    {"OZKGY", "OZKGY.IS"}, {"DOAS", "DOAS.IS"}, {"GUBRE", "GUBRF.IS"},
+                    {"SISECAM", "SISE.IS"}, {"TUPRAS", "TUPRS.IS"}, {"ARCELIK", "ARCLK.IS"},
+                    {"GOLTAS", "GOLTS.IS"}, {"ISBANK", "ISCTR.IS"}, {"DOGUS", "DOAS.IS"}
+                };
+                if (auto it = kTrTickers.find(folded); it != kTrTickers.end()) {
+                    return it->second;
+                }
+                continue;
+            }
 
             std::string upper_tok = tok;
             std::transform(upper_tok.begin(), upper_tok.end(), upper_tok.begin(), ::toupper);

@@ -85,7 +85,8 @@ public:
                                                     bool has_live_news = false,
                                                     const FundamentalProfile* fund = nullptr,
                                                     const std::string& horizon_label = "",
-                                                    int display_calendar_days = 0) {
+                                                    int display_calendar_days = 0,
+                                                    const TreasuryYieldCurveData* yc = nullptr) {
         ForecastResult res;
         res.symbol = data.symbol;
         res.trading_days = std::max(1, trading_days);
@@ -131,12 +132,14 @@ public:
         const double sigma = std::clamp(data.annualized_volatility, 0.05, 1.60);
         const double vol_horizon = sigma * std::sqrt(T);
 
-        // 1. Shrunk Nominal Carry Baseline (smooth, currency-consistent, no arbitrary switches)
-        double r_carry = 0.022; // USD shrunk nominal drift (~2.2%/yr)
+        // 1. Shrunk Nominal Carry Baseline (uses live US Treasury yields when available)
+        double r_carry = 0.022; // USD shrunk nominal drift (~2.2%/yr fallback)
         if (ccy_code == "TRY") {
             r_carry = 0.175;    // TRY shrunk nominal carry (~17.5%/yr; ~0.35% per 5 trading days)
         } else if (ccy_code == "EUR") {
             r_carry = 0.016;    // EUR shrunk nominal drift (~1.6%/yr)
+        } else if (yc != nullptr && yc->is_live && yc->three_month_yield > 0.0) {
+            r_carry = std::clamp(yc->three_month_yield * 0.55, 0.005, 0.06);
         }
 
         // 2. Causal Price/Volume Technical Pillar [-1, +1]
@@ -247,15 +250,14 @@ public:
                                             int days,
                                             const std::string& horizon_label = "",
                                             bool has_live_news = false,
-                                            const FundamentalProfile* fund = nullptr) {
+                                            const FundamentalProfile* fund = nullptr,
+                                            const TreasuryYieldCurveData* yc = nullptr) {
         int td = calendar_to_trading_days(days);
         std::string lbl = horizon_label;
         if (lbl.empty()) {
-            if (days <= 7) lbl = I18n::tr(std::format("{} Gün ({} İşG)", days, td), std::format("{}d ({} TrdD)", days, td), std::format("{}T ({} HT)", days, td));
-            else if (days <= 35) lbl = I18n::tr(std::format("{} Gün ({} İşG)", days, td), std::format("{}d ({} TrdD)", days, td), std::format("{}T ({} HT)", days, td));
-            else lbl = I18n::tr(std::format("{} Gün ({} İşG)", days, td), std::format("{}d ({} TrdD)", days, td), std::format("{}T ({} HT)", days, td));
+            lbl = I18n::tr(std::format("{} Gün ({} İşG)", days, td), std::format("{}d ({} TrdD)", days, td), std::format("{}T ({} HT)", days, td));
         }
-        return forecast_for_trading_days(data, td, sentiment_score, has_live_news, fund, lbl, days);
+        return forecast_for_trading_days(data, td, sentiment_score, has_live_news, fund, lbl, days, yc);
     }
 
     static MultiHorizonForecast generate_multi_horizon(const RealTimeAssetData& data,
@@ -298,13 +300,13 @@ public:
         // Standard Institutional Horizons: 5 Trading Days (1W), 21 Trading Days (1M), 63 Trading Days (3M)
         multi.horizons.push_back(forecast_for_trading_days(
             data, 5, sentiment_score, has_live_news, fund,
-            I18n::tr("1 Hafta (5 İşG)", "1 Week (5 TrdD)", "1 Woche (5 HT)"), 7));
+            I18n::tr("1 Hafta (5 İşG)", "1 Week (5 TrdD)", "1 Woche (5 HT)"), 7, yc));
         multi.horizons.push_back(forecast_for_trading_days(
             data, 21, sentiment_score, has_live_news, fund,
-            I18n::tr("1 Ay (21 İşG)", "1 Month (21 TrdD)", "1 Monat (21 HT)"), 30));
+            I18n::tr("1 Ay (21 İşG)", "1 Month (21 TrdD)", "1 Monat (21 HT)"), 30, yc));
         multi.horizons.push_back(forecast_for_trading_days(
             data, 63, sentiment_score, has_live_news, fund,
-            I18n::tr("3 Ay (63 İşG)", "3 Months (63 TrdD)", "3 Monate (63 HT)"), 90));
+            I18n::tr("3 Ay (63 İşG)", "3 Months (63 TrdD)", "3 Monate (63 HT)"), 90, yc));
 
         return multi;
     }
@@ -483,17 +485,44 @@ private:
         double mom60_z = calc_excess_mom_z(60);
         double z_trend = std::tanh(0.55 * mom20_z + 0.45 * mom60_z);
 
-        // 2. Wilder-style 14-Period RSI & Short-Horizon Overextension Mean-Reversion
-        size_t rsi_len = std::min<size_t>(14, n - 1);
-        double gains = 0.0, losses = 0.0;
-        for (size_t i = n - rsi_len; i < n; ++i) {
-            double d = P[i] - P[i - 1];
-            if (d > 0.0) gains += d;
-            else losses -= d;
-        }
+        // 2. True Wilder-Smoothed 14-Period RSI & Short-Horizon Overextension Mean-Reversion
         double rsi = 50.0;
-        if (gains + losses > 1e-12) {
-            rsi = 100.0 * (gains / (gains + losses));
+        constexpr size_t rsi_period = 14;
+        if (n > rsi_period) {
+            double avg_gain = 0.0, avg_loss = 0.0;
+            for (size_t i = 1; i <= rsi_period; ++i) {
+                double d = P[i] - P[i - 1];
+                if (d > 0.0) avg_gain += d;
+                else avg_loss -= d;
+            }
+            avg_gain /= static_cast<double>(rsi_period);
+            avg_loss /= static_cast<double>(rsi_period);
+            for (size_t i = rsi_period + 1; i < n; ++i) {
+                double d = P[i] - P[i - 1];
+                double g = (d > 0.0) ? d : 0.0;
+                double l = (d < 0.0) ? -d : 0.0;
+                avg_gain = (avg_gain * (rsi_period - 1) + g) / static_cast<double>(rsi_period);
+                avg_loss = (avg_loss * (rsi_period - 1) + l) / static_cast<double>(rsi_period);
+            }
+            if (spot > 0.0 && P.back() > 0.0 && std::abs(spot - P.back()) > P.back() * 1e-4) {
+                double d = spot - P.back();
+                double g = (d > 0.0) ? d : 0.0;
+                double l = (d < 0.0) ? -d : 0.0;
+                avg_gain = (avg_gain * (rsi_period - 1) + g) / static_cast<double>(rsi_period);
+                avg_loss = (avg_loss * (rsi_period - 1) + l) / static_cast<double>(rsi_period);
+            }
+            rsi = (avg_loss < 1e-12) ? 100.0 : (100.0 - (100.0 / (1.0 + avg_gain / avg_loss)));
+        } else {
+            size_t rsi_len = n - 1;
+            double gains = 0.0, losses = 0.0;
+            for (size_t i = n - rsi_len; i < n; ++i) {
+                double d = P[i] - P[i - 1];
+                if (d > 0.0) gains += d;
+                else losses -= d;
+            }
+            if (gains + losses > 1e-12) {
+                rsi = 100.0 * (gains / (gains + losses));
+            }
         }
         double rsi_overext = (rsi - 50.0) / 24.0;
         double z_mr = -std::tanh(0.45 * vwap_z + 0.55 * rsi_overext);

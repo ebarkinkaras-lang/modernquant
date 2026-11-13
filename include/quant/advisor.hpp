@@ -318,6 +318,9 @@ private:
         std::string cash_ticker;
         std::string cash_name;
         double rf_rate = 0.042;
+        std::string rf_source = "Referans Politika Bazlı";
+        TreasuryYieldCurveData yc;
+        bool has_live_yc = false;
 
         if (region == MarketRegion::BIST) {
             plan.macro_sentiment = NewsSentimentEngine::build_bist_macro_sentiment(&client);
@@ -330,7 +333,8 @@ private:
             };
             cash_ticker = "TL_PPF_MEVDUAT";
             cash_name = "TCMB Gecelik Para Piyasası Fonu / TL Mevduat";
-            rf_rate = 0.425; // Current annual TRY money-market yield baseline
+            rf_rate = 0.425; // Referans TL para piyasası yıllık bileşik getirisi
+            rf_source = I18n::tr("TL Referans Politika Bazlı", "TRY Reference Policy Baseline", "TRY-Referenzbasis");
         } else if (region == MarketRegion::XETRA) {
             plan.macro_sentiment = NewsSentimentEngine::build_xetra_macro_sentiment(client);
             universe = {
@@ -342,10 +346,14 @@ private:
             cash_ticker = "DE_BUND_CASH";
             cash_name = "Almanya Kısa Vadeli Devlet Tahvili (Bund) / Euro Para Piyasası";
             rf_rate = 0.0265;
+            rf_source = I18n::tr("EUR Referans Politika Bazlı", "EUR Reference Policy Baseline", "EUR-Referenzbasis");
         } else {
             plan.macro_sentiment = NewsSentimentEngine::build_us_macro_sentiment(client);
-            auto yc = client.fetch_treasury_yields();
+            yc = client.fetch_treasury_yields();
+            has_live_yc = yc.is_live;
             rf_rate = std::clamp(yc.three_month_yield, 0.01, 0.08);
+            rf_source = yc.is_live ? I18n::tr("CANLI ^IRX T-Bill", "LIVE ^IRX T-Bill", "LIVE ^IRX T-Bill")
+                                   : I18n::tr("USD Varsayılan Baz", "USD Fallback Baseline", "USD-Fallback");
             universe = {
                 {"SPY",  "SPDR S&P 500 ETF Trust (Geniş ABD Endeksi)"},
                 {"MSFT", "Microsoft Corporation (Bulut & Kurumsal AI)"},
@@ -379,9 +387,11 @@ private:
             s.fallback_name = d.long_name.empty() ? fname : d.long_name;
             s.data = std::move(d);
             s.fund = FundamentalEngine::fetch_fundamentals(client, s.data);
+            DataQualityDashboard::record_asset_quality(s.data, &s.fund);
             s.sent = NewsSentimentEngine::get_asset_sentiment(sym, s.fallback_name, client);
             s.fc_63d = QuantForecastEngine::forecast_for_trading_days(
-                s.data, 63, s.sent.sentiment_score, s.sent.has_live_news, &s.fund
+                s.data, 63, s.sent.sentiment_score, s.sent.has_live_news, &s.fund, "", 0,
+                has_live_yc ? &yc : nullptr
             );
 
             // Inverse-Volatility x (Momentum + FAVÖK Fundamental Quality) Score
@@ -389,15 +399,16 @@ private:
             double inv_vol = 1.0 / vol;
             double quality_tilt = 1.0
                 + 0.35 * (s.fund.is_available ? s.fund.fundamental_score : 0.0)
-                + 0.25 * s.fc_63d.quant_score;
+                + 0.30 * s.fc_63d.quant_score;
+            if (s.fc_63d.quant_score < -0.15) quality_tilt *= 0.65;
             if (risk == InvestorRisk::DüşükRisk_Koruma) {
                 // Conservative profile prefers lower-vol, strong-balance-sheet names
-                s.raw_factor_weight = (inv_vol * inv_vol) * std::clamp(quality_tilt, 0.40, 1.80);
+                s.raw_factor_weight = (inv_vol * inv_vol) * std::clamp(quality_tilt, 0.35, 1.80);
             } else if (risk == InvestorRisk::Dengeli_Büyüme) {
-                s.raw_factor_weight = inv_vol * std::clamp(quality_tilt, 0.45, 1.90);
+                s.raw_factor_weight = inv_vol * std::clamp(quality_tilt, 0.40, 1.90);
             } else {
                 // Aggressive profile tilts toward higher expected 63d upside + fundamental growth
-                s.raw_factor_weight = std::pow(inv_vol, 0.5) * std::clamp(quality_tilt + 0.25 * s.fc_63d.quant_score, 0.35, 2.20);
+                s.raw_factor_weight = std::pow(inv_vol, 0.5) * std::clamp(quality_tilt + 0.25 * s.fc_63d.quant_score, 0.30, 2.20);
             }
             slots.push_back(std::move(s));
         }
@@ -428,12 +439,12 @@ private:
             cash_pos.lot_count = 0;
             cash_pos.recommendation = I18n::tr("SABİT GETİRİ / LİKİDİTE KALKANI", "FIXED YIELD / LIQUIDITY BUFFER", "ZINSPUFFER / LIQUIDITÄT");
             cash_pos.sentiment_score = 0.0;
-            cash_pos.sentiment_label = std::format("RİSKSİZ GETİRİ (~%{:.2f}/yıl)", rf_rate * 100.0);
+            cash_pos.sentiment_label = std::format("RİSKSİZ GETİRİ (~%{:.2f}/yıl | {})", rf_rate * 100.0, rf_source);
             cash_pos.sentiment_bar = "[──────┼███───]";
             cash_pos.rationale = I18n::tr(
-                std::format("Portföy oynaklığını sınırlandıran ve yıllık ~%{:.2f} risksiz getiri üreten nakit/tahvil çıpası.", rf_rate * 100.0),
-                std::format("Cash/T-Bill anchor dampening portfolio volatility while earning ~{:.2f}% annual risk-free yield.", rf_rate * 100.0),
-                std::format("Liquiditätsanker zur Volatilitätsbegrenzung mit ~{:.2f}% jährlicher Rendite.", rf_rate * 100.0)
+                std::format("Portföy oynaklığını sınırlandıran ve yıllık ~%{:.2f} getiri ({}) sunan nakit/tahvil çıpası.", rf_rate * 100.0, rf_source),
+                std::format("Cash/T-Bill anchor dampening portfolio volatility while earning ~{:.2f}% annual yield ({}).", rf_rate * 100.0, rf_source),
+                std::format("Liquiditätsanker zur Volatilitätsbegrenzung mit ~{:.2f}% p.a. ({}).", rf_rate * 100.0, rf_source)
             );
             plan.positions.push_back(std::move(cash_pos));
         }
@@ -467,7 +478,7 @@ private:
             double atr = (s.data.atr_14 > 0.0) ? s.data.atr_14 : (pos.spot_price * (eq_vols(i) / std::sqrt(252.0)) * 1.35);
             double stop_dist = std::clamp(2.0 * atr, 0.035 * pos.spot_price, 0.12 * pos.spot_price);
             pos.stop_loss = pos.spot_price - stop_dist;
-            pos.target_price = std::max(s.fc_63d.target_price, pos.spot_price + 1.8 * atr);
+            pos.target_price = s.fc_63d.target_price;
 
             pos.fundamental_summary = s.fund.summary_line;
             pos.fundamental_grade = s.fund.quality_grade;

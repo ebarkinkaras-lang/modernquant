@@ -4,6 +4,7 @@
 #include "live_market_data.hpp"
 #include "news_sentiment.hpp"
 #include "fundamentals.hpp"
+#include "data_quality.hpp"
 #include "i18n.hpp"
 #include <string>
 #include <vector>
@@ -111,6 +112,7 @@ public:
             if (any_live && !data.is_live) continue;
 
             FundamentalProfile fund = FundamentalEngine::fetch_fundamentals(client, data);
+            DataQualityDashboard::record_asset_quality(data, &fund);
             auto candidate = evaluate_asset_(item, data, fund, bench_ret_20d);
 
             if (options.exclude_crowded && candidate.category == AlphaCategory::CrowdedTradeWarning) {

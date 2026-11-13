@@ -694,6 +694,7 @@ public:
             prof.live_headline_count = 0;
             prof.sentiment_score = 0.0;
         }
+        DataQualityTelemetry::record_news_fetch(prof.ticker, prof.has_live_news, prof.headlines.size());
 
         // Dynamic, asset-appropriate catalyst & risk context (informational only; never biases score)
         if (prof.ticker == "GRAM-ALTIN.TL" || prof.ticker == "GC=F" ||

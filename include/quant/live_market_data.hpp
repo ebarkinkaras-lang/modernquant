@@ -4,6 +4,7 @@
 #define BOOST_JSON_NO_LIB
 #endif
 
+#include "data_telemetry.hpp"
 #include <boost/json.hpp>
 #include <curl/curl.h>
 #include <string>
@@ -17,6 +18,7 @@
 #include <sstream>
 #include <format>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 
 namespace quant {
@@ -54,6 +56,11 @@ struct RealTimeAssetData {
     bool is_synthetic_metal{false};
     double underlying_ounce_usd{0.0};
     double underlying_usdtry{0.0};
+    int64_t regular_market_time{0};
+    std::chrono::system_clock::time_point fetched_at{};
+    size_t raw_bar_count{0};
+    size_t null_bars_skipped{0};
+    size_t split_adjustments_applied{0};
     std::string error_message;
 };
 
@@ -71,6 +78,8 @@ struct AlignedPairSeries {
     std::vector<double> prices_b;
     std::vector<double> volumes_a;
     std::vector<double> volumes_b;
+    std::vector<size_t> indices_a;
+    std::vector<size_t> indices_b;
 };
 
 class LiveMarketDataClient {
@@ -157,23 +166,74 @@ public:
         return "USD";
     }
 
+    static constexpr std::chrono::seconds kAssetCacheTtl{60};
+    static constexpr std::chrono::seconds kFxCacheTtl{60};
+    static constexpr std::chrono::seconds kYieldCacheTtl{300};
+
+    void clear_caches() {
+        asset_cache_.clear();
+        fx_cache_.clear();
+        has_cached_yields_ = false;
+        yahoo_crumb_.clear();
+        last_crumb_attempt_at_ = {};
+    }
+
+    // Resolve bare local tickers intelligently (.IS -> .DE) when primary exchange returns no quote
+    RealTimeAssetData fetch_asset_smart(const std::string& symbol,
+                                        const std::string& range = "6mo",
+                                        bool force_refresh = false) {
+        std::string norm_sym = normalize_symbol(symbol);
+        auto data = fetch_asset(norm_sym, range, force_refresh);
+        if ((!data.is_live || data.current_price <= 0.0) &&
+            norm_sym.find('.') == std::string::npos &&
+            norm_sym.find('-') == std::string::npos &&
+            norm_sym.find('=') == std::string::npos &&
+            !norm_sym.starts_with("^")) {
+            auto bist_try = fetch_asset(norm_sym + ".IS", range, force_refresh);
+            if (bist_try.is_live && bist_try.current_price > 0.0) {
+                return bist_try;
+            }
+            auto xetra_try = fetch_asset(norm_sym + ".DE", range, force_refresh);
+            if (xetra_try.is_live && xetra_try.current_price > 0.0) {
+                return xetra_try;
+            }
+        }
+        return data;
+    }
+
     // Fetch real-time & historical market data from Yahoo Finance (default 6mo for robust vol/RSI/ATR)
-    RealTimeAssetData fetch_asset(const std::string& symbol, const std::string& range = "6mo") {
+    RealTimeAssetData fetch_asset(const std::string& symbol,
+                                  const std::string& range = "6mo",
+                                  bool force_refresh = false) {
         std::string norm_sym = normalize_symbol(symbol);
         std::string cache_key = norm_sym + "|" + range;
+        const auto now_steady = std::chrono::steady_clock::now();
 
-        if (auto it = asset_cache_.find(cache_key); it != asset_cache_.end()) {
-            return it->second;
+        if (!force_refresh) {
+            if (auto it = asset_cache_.find(cache_key); it != asset_cache_.end()) {
+                if ((now_steady - it->second.fetched_at) < kAssetCacheTtl) {
+                    DataQualityTelemetry::record_fetch(
+                        "Yahoo v8 Chart",
+                        "query1.finance.yahoo.com/v8/finance/chart",
+                        it->second.data.is_live,
+                        std::chrono::milliseconds(0),
+                        true,
+                        it->second.data.is_live ? "" : it->second.data.error_message,
+                        it->second.data.is_live ? 200 : 0
+                    );
+                    return it->second.data;
+                }
+            }
         }
 
         if (norm_sym == "GRAM-ALTIN.TL") {
-            auto res = fetch_gram_precious_metal_tl_("GC=F", "GRAM-ALTIN.TL", "24 Ayar Has Gram Altın (TL)", 6448.0, range);
-            asset_cache_[cache_key] = res;
+            auto res = fetch_gram_precious_metal_tl_("GC=F", "GRAM-ALTIN.TL", "24 Ayar Has Gram Altın (TL)", 6448.0, range, force_refresh);
+            if (res.is_live) asset_cache_[cache_key] = {res, now_steady};
             return res;
         }
         if (norm_sym == "GRAM-GUMUS.TL") {
-            auto res = fetch_gram_precious_metal_tl_("SI=F", "GRAM-GUMUS.TL", "Has Gram Gümüş (TL)", 76.50, range);
-            asset_cache_[cache_key] = res;
+            auto res = fetch_gram_precious_metal_tl_("SI=F", "GRAM-GUMUS.TL", "Has Gram Gümüş (TL)", 76.50, range, force_refresh);
+            if (res.is_live) asset_cache_[cache_key] = {res, now_steady};
             return res;
         }
 
@@ -181,6 +241,7 @@ public:
         data.symbol = norm_sym;
         data.currency_code = infer_currency_code(norm_sym);
         data.currency_display = currency_display_for(data.currency_code, norm_sym);
+        data.fetched_at = std::chrono::system_clock::now();
 
         std::string url = std::format(
             "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range={}",
@@ -188,12 +249,25 @@ public:
         );
 
         long http_code = 0;
-        std::string response = http_get(url, &http_code);
+        std::string http_err;
+        auto t0 = std::chrono::steady_clock::now();
+        std::string response = http_get(url, &http_code, &http_err);
+        auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0);
 
         if (response.empty()) {
             // Network completely unreachable -> mark is_live = false explicitly
             data.is_live = false;
             data.error_message = "Piyasa API ağına ulaşılamadı (Çevrimdışı mod).";
+            DataQualityTelemetry::record_fetch(
+                "Yahoo v8 Chart",
+                "query1.finance.yahoo.com/v8/finance/chart",
+                false,
+                latency,
+                false,
+                http_err.empty() ? "Network unreachable" : http_err,
+                http_code
+            );
             populate_offline_fallback_(data);
             compute_analytics(data);
             return data;
@@ -205,12 +279,32 @@ public:
             if (data.error_message.empty()) {
                 data.error_message = std::format("'{}' sembolü için geçerli borsa verisi bulunamadı (HTTP {}).", norm_sym, http_code);
             }
+            DataQualityTelemetry::record_fetch(
+                "Yahoo v8 Chart",
+                "query1.finance.yahoo.com/v8/finance/chart",
+                false,
+                latency,
+                false,
+                data.error_message,
+                http_code
+            );
             return data;
         }
 
+        DataQualityTelemetry::record_fetch(
+            "Yahoo v8 Chart",
+            "query1.finance.yahoo.com/v8/finance/chart",
+            true,
+            latency,
+            false,
+            "",
+            http_code > 0 ? http_code : 200
+        );
+
+        data.fetched_at = std::chrono::system_clock::now();
         compute_analytics(data);
         if (data.is_live) {
-            asset_cache_[cache_key] = data;
+            asset_cache_[cache_key] = {data, std::chrono::steady_clock::now()};
         }
         return data;
     }
@@ -247,7 +341,10 @@ public:
         const auto& res0 = res_it->value().as_array()[0].as_object();
 
         int64_t gmt_offset = 0;
+        int64_t reg_time = 0;
         double reg_price = 0.0;
+        double meta_prev = 0.0;
+        double chart_prev = 0.0;
 
         if (auto meta_it = res0.find("meta"); meta_it != res0.end() && meta_it->value().is_object()) {
             const auto& meta = meta_it->value().as_object();
@@ -264,9 +361,12 @@ public:
             }
 
             gmt_offset = get_int64_(meta, "gmtoffset", 0);
+            reg_time = get_int64_(meta, "regularMarketTime", 0);
+            data.regular_market_time = reg_time;
             reg_price = get_double_(meta, "regularMarketPrice", 0.0);
-            if (reg_price <= 0.0) reg_price = get_double_(meta, "chartPreviousClose", 0.0);
-            data.previous_close = get_double_(meta, "chartPreviousClose", 0.0);
+            meta_prev = get_double_(meta, "previousClose", 0.0);
+            chart_prev = get_double_(meta, "chartPreviousClose", 0.0);
+            data.previous_close = (meta_prev > 0.0) ? meta_prev : chart_prev;
             data.fifty_two_week_high = get_double_(meta, "fiftyTwoWeekHigh", 0.0);
             data.fifty_two_week_low = get_double_(meta, "fiftyTwoWeekLow", 0.0);
         }
@@ -313,6 +413,9 @@ public:
         }
 
         size_t n = close_arr->size();
+        data.raw_bar_count = n;
+        data.null_bars_skipped = 0;
+        data.split_adjustments_applied = 0;
         data.timestamps.clear();
         data.day_keys.clear();
         data.historical_opens.clear();
@@ -331,43 +434,58 @@ public:
         data.historical_prices.reserve(n);
         data.historical_volumes.reserve(n);
 
+        const int64_t reg_day_key = (reg_time > 0) ? ((reg_time + gmt_offset) / 86400) : -1;
+
         // Synchronized row-by-row extraction: guarantees identical array lengths across all columns
         for (size_t i = 0; i < n; ++i) {
+            int64_t ts = elem_int64_(ts_arr, i, static_cast<int64_t>(i) * 86400);
+            int64_t day_key = (ts + gmt_offset) / 86400;
+
             double raw_c = elem_double_(close_arr, i, -1.0);
+            double adj_c = elem_double_(adj_arr, i, -1.0);
+            double o_probe = elem_double_(open_arr, i, -1.0);
+            double h_probe = elem_double_(high_arr, i, -1.0);
+            double l_probe = elem_double_(low_arr, i, -1.0);
+            double v_probe = elem_double_(vol_arr, i, 0.0);
+
             if (raw_c <= 0.0) {
-                // Skip holiday / pre-market / unopened null bar uniformly across all arrays
-                continue;
+                // Recover live active intraday bar when Yahoo leaves today's final close null alongside regularMarketPrice
+                bool is_trailing_live_bar = (i + 1 == n) && (reg_price > 0.0) && (reg_day_key > 0) &&
+                                            (day_key == reg_day_key) &&
+                                            (o_probe > 0.0 || h_probe > 0.0 || l_probe > 0.0 || v_probe > 0.0);
+                if (is_trailing_live_bar) {
+                    raw_c = reg_price;
+                    adj_c = reg_price;
+                } else {
+                    // Skip holiday / pre-market / unopened null bar uniformly across all arrays
+                    data.null_bars_skipped++;
+                    continue;
+                }
             }
 
-            double adj_c = elem_double_(adj_arr, i, -1.0);
             if (adj_c <= 0.0) adj_c = raw_c;
 
-            double o = elem_double_(open_arr, i, raw_c);
-            double h = elem_double_(high_arr, i, raw_c);
-            double l = elem_double_(low_arr, i, raw_c);
-            if (o <= 0.0) o = raw_c;
+            double o = (o_probe > 0.0) ? o_probe : raw_c;
+            double h = (h_probe > 0.0) ? h_probe : raw_c;
+            double l = (l_probe > 0.0) ? l_probe : raw_c;
             if (h < std::max(o, raw_c)) h = std::max(o, raw_c);
             if (l <= 0.0 || l > std::min(o, raw_c)) l = std::min(o, raw_c);
 
-            double v = elem_double_(vol_arr, i, 0.0);
-            if (v < 0.0) v = 0.0;
+            double v = std::max(0.0, v_probe);
 
-            int64_t ts = elem_int64_(ts_arr, i, static_cast<int64_t>(i) * 86400);
-            int64_t day_key = (ts + gmt_offset) / 86400;
+            // Rescale O/H/L by the dividend/split adjustment factor (adj_c / raw_c)
+            double adj_factor = (raw_c > 0.0) ? (adj_c / raw_c) : 1.0;
 
             // Deduplicate if Yahoo appends an extra live tick on the exact same trading day
             if (!data.day_keys.empty() && data.day_keys.back() == day_key) {
                 data.timestamps.back() = ts;
-                data.historical_highs.back() = std::max(data.historical_highs.back(), h);
-                data.historical_lows.back() = std::min(data.historical_lows.back(), l);
+                data.historical_highs.back() = std::max(data.historical_highs.back(), h * adj_factor);
+                data.historical_lows.back() = std::min(data.historical_lows.back(), l * adj_factor);
                 data.historical_raw_closes.back() = raw_c;
                 data.historical_prices.back() = adj_c;
                 data.historical_volumes.back() = std::max(data.historical_volumes.back(), v);
                 continue;
             }
-
-            // Rescale O/H/L by the dividend/split adjustment factor (adj_c / raw_c)
-            double adj_factor = (raw_c > 0.0) ? (adj_c / raw_c) : 1.0;
 
             data.timestamps.push_back(ts);
             data.day_keys.push_back(day_key);
@@ -380,6 +498,12 @@ public:
         }
 
         if (data.historical_prices.empty()) {
+            if (reg_price > 0.0) {
+                data.current_price = reg_price;
+                data.previous_close = (meta_prev > 0.0) ? meta_prev : chart_prev;
+                data.is_live = true;
+                return true;
+            }
             return false;
         }
 
@@ -393,6 +517,7 @@ public:
                 if (prev_p > 0.0 && curr_p > 0.0) {
                     double lr = std::log(curr_p / prev_p);
                     if (lr < -0.33 || lr > 0.35) {
+                        data.split_adjustments_applied++;
                         double split_ratio = curr_p / prev_p;
                         for (size_t k = 0; k < i; ++k) {
                             data.historical_prices[k] *= split_ratio;
@@ -406,6 +531,17 @@ public:
         }
 
         data.current_price = (reg_price > 0.0) ? reg_price : data.historical_prices.back();
+        if (meta_prev > 0.0) {
+            data.previous_close = meta_prev;
+        } else if (data.historical_prices.size() >= 2) {
+            bool last_is_today = (reg_day_key > 0 && data.day_keys.back() == reg_day_key) ||
+                (reg_price > 0.0 && std::abs(reg_price - data.historical_prices.back()) <= data.historical_prices.back() * 1e-4);
+            data.previous_close = last_is_today
+                ? data.historical_prices[data.historical_prices.size() - 2]
+                : data.historical_prices.back();
+        } else {
+            data.previous_close = (chart_prev > 0.0) ? chart_prev : data.historical_prices.back();
+        }
         data.is_live = true;
         return true;
     }
@@ -568,6 +704,8 @@ public:
                 out.prices_b.push_back(b.historical_prices[off_b + i]);
                 out.volumes_a.push_back(off_a + i < a.historical_volumes.size() ? a.historical_volumes[off_a + i] : 0.0);
                 out.volumes_b.push_back(off_b + i < b.historical_volumes.size() ? b.historical_volumes[off_b + i] : 0.0);
+                out.indices_a.push_back(off_a + i);
+                out.indices_b.push_back(off_b + i);
             }
             return out;
         }
@@ -601,72 +739,40 @@ public:
                 out.prices_b.push_back(b.historical_prices[matched_j]);
                 out.volumes_a.push_back(i < a.historical_volumes.size() ? a.historical_volumes[i] : 0.0);
                 out.volumes_b.push_back(matched_j < b.historical_volumes.size() ? b.historical_volumes[matched_j] : 0.0);
+                out.indices_a.push_back(i);
+                out.indices_b.push_back(matched_j);
             }
         }
         return out;
     }
 
-    // Live FX cross-rate converter (e.g. USD -> TRY, EUR -> TRY, EUR -> USD) with session cache
-    double get_fx_rate(const std::string& from_ccy, const std::string& to_ccy) {
-        std::string f = infer_currency_code("", from_ccy);
-        std::string t = infer_currency_code("", to_ccy);
-        if (f.empty() || t.empty() || f == t) return 1.0;
-
-        std::string key = f + "_" + t;
-        if (auto it = fx_cache_.find(key); it != fx_cache_.end()) {
-            return it->second;
-        }
-
-        auto fetch_pair = [this](const std::string& ticker) -> double {
-            auto d = fetch_asset(ticker, "5d");
-            return (d.is_live && d.current_price > 0.0) ? d.current_price : -1.0;
-        };
-
-        double rate = -1.0;
-        if (f == "USD" && t == "TRY") {
-            rate = fetch_pair("TRY=X");
-        } else if (f == "TRY" && t == "USD") {
-            double r = get_fx_rate("USD", "TRY");
-            rate = (r > 0.0) ? (1.0 / r) : -1.0;
-        } else if (f == "EUR" && t == "TRY") {
-            rate = fetch_pair("EURTRY=X");
-            if (rate <= 0.0) {
-                double eu = get_fx_rate("EUR", "USD");
-                double ut = get_fx_rate("USD", "TRY");
-                if (eu > 0.0 && ut > 0.0) rate = eu * ut;
-            }
-        } else if (f == "TRY" && t == "EUR") {
-            double r = get_fx_rate("EUR", "TRY");
-            rate = (r > 0.0) ? (1.0 / r) : -1.0;
-        } else {
-            rate = fetch_pair(f + t + "=X");
-            if (rate <= 0.0) {
-                double inv = fetch_pair(t + f + "=X");
-                if (inv > 0.0) rate = 1.0 / inv;
-            }
-        }
-
-        if (rate <= 0.0) {
-            // Emergency offline fallback constants
-            if (f == "USD" && t == "TRY") rate = 38.0;
-            else if (f == "EUR" && t == "TRY") rate = 41.0;
-            else if (f == "EUR" && t == "USD") rate = 1.08;
-            else rate = 1.0;
-        } else {
-            fx_cache_[key] = rate;
-        }
-        return rate;
+    // Live FX cross-rate converter (e.g. USD -> TRY, EUR -> TRY, EUR -> USD) with TTL cache
+    double get_fx_rate(const std::string& from_ccy, const std::string& to_ccy, bool force_refresh = false) {
+        return get_fx_entry_(from_ccy, to_ccy, force_refresh).rate;
     }
 
-    // Fetch live US Treasury yields (^IRX=3M, ^FVX=5Y, ^TNX=10Y, ^TYX=30Y) with honest is_live flag
-    TreasuryYieldCurveData fetch_treasury_yields() {
-        if (has_cached_yields_) return cached_yields_;
+    // Fetch live US Treasury yields (^IRX=3M, ^FVX=5Y, ^TNX=10Y, ^TYX=30Y) with honest is_live flag & TTL
+    TreasuryYieldCurveData fetch_treasury_yields(bool force_refresh = false) {
+        const auto now_steady = std::chrono::steady_clock::now();
+        if (!force_refresh && has_cached_yields_ && (now_steady - yields_fetched_at_) < kYieldCacheTtl) {
+            DataQualityTelemetry::record_fetch(
+                "Yahoo Treasury Yields",
+                "query1.finance.yahoo.com/v8/finance/chart/^IRX,^FVX,^TNX,^TYX",
+                cached_yields_.is_live,
+                std::chrono::milliseconds(0),
+                true,
+                "",
+                cached_yields_.is_live ? 200 : 0
+            );
+            return cached_yields_;
+        }
 
+        auto t0 = std::chrono::steady_clock::now();
         TreasuryYieldCurveData curve;
         int live_hits = 0;
 
-        auto fetch_rate = [this, &live_hits](const std::string& sym, double default_rate) -> double {
-            auto d = fetch_asset(sym, "5d");
+        auto fetch_rate = [this, &live_hits, force_refresh](const std::string& sym, double default_rate) -> double {
+            auto d = fetch_asset(sym, "5d", force_refresh);
             if (d.is_live && d.current_price > 0.0) {
                 ++live_hits;
                 return d.current_price / 100.0;
@@ -679,9 +785,22 @@ public:
         curve.ten_year_yield    = fetch_rate("^TNX", 0.0425);
         curve.thirty_year_yield = fetch_rate("^TYX", 0.0450);
         curve.is_live = (live_hits >= 2);
+        auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0);
+
+        DataQualityTelemetry::record_fetch(
+            "Yahoo Treasury Yields",
+            "query1.finance.yahoo.com/v8/finance/chart/^IRX,^FVX,^TNX,^TYX",
+            curve.is_live,
+            latency,
+            false,
+            curve.is_live ? "" : std::format("Only {}/4 yield tickers live", live_hits),
+            curve.is_live ? 200 : 503
+        );
 
         if (curve.is_live) {
             cached_yields_ = curve;
+            yields_fetched_at_ = std::chrono::steady_clock::now();
             has_cached_yields_ = true;
         }
         return curve;
@@ -694,15 +813,64 @@ public:
             "https://query2.finance.yahoo.com/v1/finance/search?q={}&quotesCount=0&newsCount={}",
             url_encode(query), count
         );
-        std::string resp = http_get(url);
-        if (resp.empty()) return headlines;
+        long http_code = 0;
+        std::string http_err;
+        auto t0 = std::chrono::steady_clock::now();
+        std::string resp = http_get(url, &http_code, &http_err);
+        auto latency = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0);
+
+        if (resp.empty()) {
+            DataQualityTelemetry::record_fetch(
+                "Yahoo v1 News Search",
+                "query2.finance.yahoo.com/v1/finance/search",
+                false,
+                latency,
+                false,
+                http_err.empty() ? "Empty news response" : http_err,
+                http_code
+            );
+            return headlines;
+        }
 
         boost::system::error_code ec;
         boost::json::value root = boost::json::parse(resp, ec);
-        if (ec || !root.is_object()) return headlines;
+        if (ec || !root.is_object()) {
+            DataQualityTelemetry::record_fetch(
+                "Yahoo v1 News Search",
+                "query2.finance.yahoo.com/v1/finance/search",
+                false,
+                latency,
+                false,
+                "Invalid news JSON response",
+                http_code
+            );
+            return headlines;
+        }
 
         auto news_it = root.as_object().find("news");
-        if (news_it == root.as_object().end() || !news_it->value().is_array()) return headlines;
+        if (news_it == root.as_object().end() || !news_it->value().is_array()) {
+            DataQualityTelemetry::record_fetch(
+                "Yahoo v1 News Search",
+                "query2.finance.yahoo.com/v1/finance/search",
+                false,
+                latency,
+                false,
+                "Missing news array in JSON",
+                http_code
+            );
+            return headlines;
+        }
+
+        DataQualityTelemetry::record_fetch(
+            "Yahoo v1 News Search",
+            "query2.finance.yahoo.com/v1/finance/search",
+            true,
+            latency,
+            false,
+            "",
+            http_code > 0 ? http_code : 200
+        );
 
         std::unordered_set<std::string> seen_titles;
         for (const auto& item : news_it->value().as_array()) {
@@ -723,7 +891,8 @@ public:
     }
 
     // Direct HTTP GET with 1 retry on transient network error
-    std::string http_get(const std::string& url, long* out_http_code = nullptr) {
+    std::string http_get(const std::string& url, long* out_http_code = nullptr, std::string* out_error = nullptr) {
+        std::string last_err;
         for (int attempt = 0; attempt < 2; ++attempt) {
             CURL* curl = curl_easy_init();
             std::string read_buffer;
@@ -746,40 +915,79 @@ public:
 
                 if (out_http_code) *out_http_code = http_code;
                 if (res == CURLE_OK && !read_buffer.empty()) {
-                    return read_buffer;
+                    bool transient_http = (http_code == 429 || http_code >= 500);
+                    if (!transient_http || attempt == 1) {
+                        if (out_error) out_error->clear();
+                        return read_buffer;
+                    }
+                    last_err = std::format("Transient HTTP {}", http_code);
+                    continue;
                 }
+                if (res != CURLE_OK) {
+                    last_err = curl_easy_strerror(res);
+                } else if (http_code >= 400) {
+                    last_err = std::format("HTTP {}", http_code);
+                } else {
+                    last_err = "Empty response";
+                }
+            } else {
+                last_err = "curl_easy_init failed";
             }
         }
+        if (out_error) *out_error = last_err;
         return {};
     }
 
     // Authenticated Yahoo Finance GET using session cookie + crumb (for v10 quoteSummary)
-    std::string http_get_yahoo_crumb(const std::string& base_url_without_crumb) {
-        if (!ensure_yahoo_crumb_()) return {};
-        char sep = (base_url_without_crumb.find('?') == std::string::npos) ? '?' : '&';
-        std::string full_url = std::format("{}{}crumb={}", base_url_without_crumb, sep, url_encode(yahoo_crumb_));
+    std::string http_get_yahoo_crumb(const std::string& base_url_without_crumb,
+                                     long* out_http_code = nullptr,
+                                     std::string* out_error = nullptr) {
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (!ensure_yahoo_crumb_(attempt > 0)) {
+                if (out_http_code) *out_http_code = last_crumb_http_code_;
+                if (out_error) *out_error = last_crumb_error_.empty() ? "Crumb auth failed" : last_crumb_error_;
+                return {};
+            }
+            char sep = (base_url_without_crumb.find('?') == std::string::npos) ? '?' : '&';
+            std::string full_url = std::format("{}{}crumb={}", base_url_without_crumb, sep, url_encode(yahoo_crumb_));
 
-        CURL* curl = curl_easy_init();
-        std::string read_buffer;
-        long http_code = 0;
-        if (curl) {
-            curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
-            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-            curl_easy_setopt(curl, CURLOPT_COOKIEFILE, cookie_file_path_.c_str());
-            curl_easy_setopt(curl, CURLOPT_COOKIEJAR, cookie_file_path_.c_str());
-            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback_);
-            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &read_buffer);
-            curl_easy_setopt(curl, CURLOPT_USERAGENT,
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
-            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 7L);
-            curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+            CURL* curl = curl_easy_init();
+            std::string read_buffer;
+            long http_code = 0;
+            if (curl) {
+                curl_easy_setopt(curl, CURLOPT_URL, full_url.c_str());
+                curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+                curl_easy_setopt(curl, CURLOPT_COOKIEFILE, cookie_file_path_.c_str());
+                curl_easy_setopt(curl, CURLOPT_COOKIEJAR, cookie_file_path_.c_str());
+                curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback_);
+                curl_easy_setopt(curl, CURLOPT_WRITEDATA, &read_buffer);
+                curl_easy_setopt(curl, CURLOPT_USERAGENT,
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+                curl_easy_setopt(curl, CURLOPT_TIMEOUT, 7L);
+                curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
 
-            CURLcode res = curl_easy_perform(curl);
-            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-            curl_easy_cleanup(curl);
+                CURLcode res = curl_easy_perform(curl);
+                curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+                curl_easy_cleanup(curl);
 
-            if (res == CURLE_OK && http_code == 200) {
-                return read_buffer;
+                if (out_http_code) *out_http_code = http_code;
+                if (res == CURLE_OK && http_code == 200) {
+                    if (out_error) out_error->clear();
+                    return read_buffer;
+                }
+                if ((http_code == 401 || http_code == 403) && attempt == 0) {
+                    // Crumb/cookie expired -> force refresh once
+                    yahoo_crumb_.clear();
+                    continue;
+                }
+                if (out_error) {
+                    if (res != CURLE_OK) *out_error = curl_easy_strerror(res);
+                    else *out_error = std::format("HTTP {}", http_code);
+                }
+                return {};
+            } else if (out_error) {
+                *out_error = "curl_easy_init failed";
+                return {};
             }
         }
         return {};
@@ -799,19 +1007,109 @@ public:
     }
 
 private:
-    std::unordered_map<std::string, RealTimeAssetData> asset_cache_;
-    std::unordered_map<std::string, double> fx_cache_;
+    struct AssetCacheEntry {
+        RealTimeAssetData data;
+        std::chrono::steady_clock::time_point fetched_at{};
+    };
+
+    struct FxCacheEntry {
+        double rate{1.0};
+        bool is_live{false};
+        std::string source;
+        std::chrono::steady_clock::time_point fetched_at{};
+    };
+
+    std::unordered_map<std::string, AssetCacheEntry> asset_cache_;
+    std::unordered_map<std::string, FxCacheEntry> fx_cache_;
     TreasuryYieldCurveData cached_yields_;
+    std::chrono::steady_clock::time_point yields_fetched_at_{};
     bool has_cached_yields_{false};
 
     std::string cookie_file_path_;
     std::string yahoo_crumb_;
-    bool crumb_attempted_{false};
+    std::chrono::steady_clock::time_point last_crumb_attempt_at_{};
+    long last_crumb_http_code_{0};
+    std::string last_crumb_error_;
 
-    bool ensure_yahoo_crumb_() {
-        if (!yahoo_crumb_.empty()) return true;
-        if (crumb_attempted_) return false;
-        crumb_attempted_ = true;
+    FxCacheEntry get_fx_entry_(const std::string& from_ccy, const std::string& to_ccy, bool force_refresh = false) {
+        std::string f = infer_currency_code("", from_ccy);
+        std::string t = infer_currency_code("", to_ccy);
+        if (f.empty() || t.empty() || f == t) return {1.0, true, "identity", std::chrono::steady_clock::now()};
+
+        std::string key = f + "_" + t;
+        std::string pair = f + "/" + t;
+        const auto now_steady = std::chrono::steady_clock::now();
+        if (!force_refresh) {
+            if (auto it = fx_cache_.find(key); it != fx_cache_.end()) {
+                if ((now_steady - it->second.fetched_at) < kFxCacheTtl) {
+                    DataQualityTelemetry::record_fx_rate(pair, it->second.rate, it->second.is_live, it->second.source);
+                    return it->second;
+                }
+            }
+        }
+
+        auto fetch_pair = [this, force_refresh](const std::string& ticker) -> double {
+            auto d = fetch_asset(ticker, "5d", force_refresh);
+            return (d.is_live && d.current_price > 0.0) ? d.current_price : -1.0;
+        };
+
+        FxCacheEntry entry;
+        if (f == "USD" && t == "TRY") {
+            double r = fetch_pair("TRY=X");
+            if (r > 0.0) entry = {r, true, "live", now_steady};
+        } else if (f == "TRY" && t == "USD") {
+            auto r = get_fx_entry_("USD", "TRY", force_refresh);
+            if (r.is_live && r.rate > 0.0) entry = {1.0 / r.rate, true, "live (inv)", now_steady};
+        } else if (f == "EUR" && t == "TRY") {
+            double r = fetch_pair("EURTRY=X");
+            if (r > 0.0) {
+                entry = {r, true, "live", now_steady};
+            } else {
+                auto eu = get_fx_entry_("EUR", "USD", force_refresh);
+                auto ut = get_fx_entry_("USD", "TRY", force_refresh);
+                if (eu.is_live && ut.is_live && eu.rate > 0.0 && ut.rate > 0.0) {
+                    entry = {eu.rate * ut.rate, true, "live (cross)", now_steady};
+                }
+            }
+        } else if (f == "TRY" && t == "EUR") {
+            auto r = get_fx_entry_("EUR", "TRY", force_refresh);
+            if (r.is_live && r.rate > 0.0) entry = {1.0 / r.rate, true, "live (inv)", now_steady};
+        } else {
+            double r = fetch_pair(f + t + "=X");
+            if (r > 0.0) {
+                entry = {r, true, "live", now_steady};
+            } else {
+                double inv = fetch_pair(t + f + "=X");
+                if (inv > 0.0) entry = {1.0 / inv, true, "live (inv)", now_steady};
+            }
+        }
+
+        if (!entry.is_live || entry.rate <= 0.0) {
+            // Emergency offline fallback constants
+            double fb = 1.0;
+            if (f == "USD" && t == "TRY") fb = 38.0;
+            else if (f == "EUR" && t == "TRY") fb = 41.0;
+            else if (f == "EUR" && t == "USD") fb = 1.08;
+            else if (f == "TRY" && t == "USD") fb = 1.0 / 38.0;
+            else if (f == "TRY" && t == "EUR") fb = 1.0 / 41.0;
+            entry = {fb, false, "fallback", now_steady};
+            DataQualityTelemetry::record_fx_rate(pair, entry.rate, false, "fallback");
+        } else {
+            entry.fetched_at = std::chrono::steady_clock::now();
+            fx_cache_[key] = entry;
+            DataQualityTelemetry::record_fx_rate(pair, entry.rate, true, entry.source);
+        }
+        return entry;
+    }
+
+    bool ensure_yahoo_crumb_(bool force_retry = false) {
+        if (!force_retry && !yahoo_crumb_.empty()) return true;
+        const auto now_steady = std::chrono::steady_clock::now();
+        if (!force_retry && last_crumb_attempt_at_.time_since_epoch().count() != 0 &&
+            (now_steady - last_crumb_attempt_at_) < std::chrono::seconds(30)) {
+            return false;
+        }
+        last_crumb_attempt_at_ = now_steady;
 
         cookie_file_path_ = "yf_session_cookies.tmp";
 
@@ -819,7 +1117,10 @@ private:
         {
             CURL* curl = curl_easy_init();
             std::string sink;
-            if (!curl) return false;
+            if (!curl) {
+                last_crumb_error_ = "curl_easy_init failed";
+                return false;
+            }
             curl_easy_setopt(curl, CURLOPT_URL, "https://fc.yahoo.com");
             curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
             curl_easy_setopt(curl, CURLOPT_COOKIEJAR, cookie_file_path_.c_str());
@@ -830,7 +1131,10 @@ private:
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
             curl_easy_setopt(curl, CURLOPT_TIMEOUT, 5L);
             curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-            curl_easy_perform(curl);
+            CURLcode res = curl_easy_perform(curl);
+            if (res != CURLE_OK) {
+                last_crumb_error_ = std::string("Cookie step failed: ") + curl_easy_strerror(res);
+            }
             curl_easy_cleanup(curl);
         }
 
@@ -839,7 +1143,10 @@ private:
             CURL* curl = curl_easy_init();
             std::string crumb_buf;
             long code = 0;
-            if (!curl) return false;
+            if (!curl) {
+                last_crumb_error_ = "curl_easy_init failed";
+                return false;
+            }
             curl_easy_setopt(curl, CURLOPT_URL, "https://query2.finance.yahoo.com/v1/test/getcrumb");
             curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
             curl_easy_setopt(curl, CURLOPT_COOKIEFILE, cookie_file_path_.c_str());
@@ -854,11 +1161,18 @@ private:
             curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
             curl_easy_cleanup(curl);
 
+            last_crumb_http_code_ = code;
             crumb_buf = trim_(crumb_buf);
             if (res == CURLE_OK && code == 200 && !crumb_buf.empty() && crumb_buf.size() < 64 &&
                 crumb_buf.find('{') == std::string::npos && crumb_buf.find('<') == std::string::npos) {
                 yahoo_crumb_ = crumb_buf;
+                last_crumb_error_.clear();
                 return true;
+            }
+            if (res != CURLE_OK) {
+                last_crumb_error_ = std::string("Crumb fetch failed: ") + curl_easy_strerror(res);
+            } else {
+                last_crumb_error_ = std::format("Crumb auth rejected (HTTP {})", code);
             }
         }
         return false;
@@ -869,10 +1183,11 @@ private:
                                                     const std::string& out_symbol,
                                                     const std::string& metal_title,
                                                     double fallback_price,
-                                                    const std::string& range) {
+                                                    const std::string& range,
+                                                    bool force_refresh = false) {
         constexpr double TROY_OUNCE_GRAMS = 31.1034768;
-        auto ons = fetch_asset(ounce_symbol, range);
-        auto usdtry = fetch_asset("TRY=X", range);
+        auto ons = fetch_asset(ounce_symbol, range, force_refresh);
+        auto usdtry = fetch_asset("TRY=X", range, force_refresh);
 
         RealTimeAssetData gram;
         gram.symbol = out_symbol;
@@ -881,15 +1196,23 @@ private:
         gram.currency_display = "TL";
         gram.instrument_type = "FUTURE";
         gram.is_synthetic_metal = true;
+        gram.fetched_at = std::chrono::system_clock::now();
 
         if (ons.is_live && usdtry.is_live && ons.current_price > 0.0 && usdtry.current_price > 0.0) {
+            const auto now_steady = std::chrono::steady_clock::now();
+            DataQualityTelemetry::record_fx_rate("USD/TRY", usdtry.current_price, true, "live");
+            if (force_refresh || !fx_cache_.contains("USD_TRY") || (now_steady - fx_cache_["USD_TRY"].fetched_at) >= kFxCacheTtl) {
+                fx_cache_["USD_TRY"] = {usdtry.current_price, true, "live", now_steady};
+            }
             gram.underlying_ounce_usd = ons.current_price;
             gram.underlying_usdtry = usdtry.current_price;
+            gram.regular_market_time = std::max(ons.regular_market_time, usdtry.regular_market_time);
             gram.current_price = (ons.current_price * usdtry.current_price) / TROY_OUNCE_GRAMS;
 
             auto aligned = align_series_by_date(ons, usdtry, true);
             size_t n = aligned.prices_a.size();
             if (n >= 2) {
+                gram.raw_bar_count = n;
                 gram.day_keys = aligned.day_keys;
                 gram.timestamps.resize(n);
                 gram.historical_prices.reserve(n);
@@ -902,11 +1225,28 @@ private:
                 for (size_t i = 0; i < n; ++i) {
                     gram.timestamps[i] = aligned.day_keys[i] * 86400;
                     double gp = (aligned.prices_a[i] * aligned.prices_b[i]) / TROY_OUNCE_GRAMS;
+                    double fx_gram = aligned.prices_b[i] / TROY_OUNCE_GRAMS;
+                    double go = gp, gh = gp * 1.004, gl = gp * 0.996;
+                    if (i < aligned.indices_a.size()) {
+                        size_t ia = aligned.indices_a[i];
+                        if (ia < ons.historical_opens.size() && ons.historical_opens[ia] > 0.0) {
+                            go = ons.historical_opens[ia] * fx_gram;
+                        }
+                        if (ia < ons.historical_highs.size() && ons.historical_highs[ia] > 0.0) {
+                            gh = ons.historical_highs[ia] * fx_gram;
+                        }
+                        if (ia < ons.historical_lows.size() && ons.historical_lows[ia] > 0.0) {
+                            gl = ons.historical_lows[ia] * fx_gram;
+                        }
+                    }
                     gram.historical_prices.push_back(gp);
                     gram.historical_raw_closes.push_back(gp);
-                    gram.historical_opens.push_back(gp);
-                    gram.historical_highs.push_back(gp * 1.006);
-                    gram.historical_lows.push_back(gp * 0.994);
+                    gram.historical_opens.push_back(go);
+                    gram.historical_highs.push_back(std::max({gh, go, gp}));
+                    gram.historical_lows.push_back(std::min({gl, go, gp}));
+                }
+                if (gram.historical_prices.size() >= 2) {
+                    gram.previous_close = gram.historical_prices[gram.historical_prices.size() - 2];
                 }
             }
             gram.is_live = true;

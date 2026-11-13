@@ -93,7 +93,7 @@ if(NOT Boost_FOUND)
 endif()
 
 # Project Targets
-add_executable(quant_suite src/main.cpp)
+add_executable(quant_suite src/main.cpp src/data_quality.cpp)
 
 target_compile_definitions(quant_suite PRIVATE BOOST_JSON_NO_LIB)
 

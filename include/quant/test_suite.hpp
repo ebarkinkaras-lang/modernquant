@@ -17,6 +17,7 @@
 #include "forecast_engine.hpp"
 #include "forecast_backtest.hpp"
 #include "alpha_screener.hpp"
+#include "data_quality.hpp"
 #include <iostream>
 #include <format>
 #include <cassert>
@@ -47,10 +48,12 @@ public:
         all_ok &= test_json_parser_and_microstructure();
         all_ok &= test_word_boundary_nlp_sentiment();
         all_ok &= test_multicurrency_favok_fundamentals();
+        all_ok &= test_data_quality_and_alerts();
+        all_ok &= test_live_intraday_cache_and_yield_wiring();
 
         std::cout << "\n-------------------------------------------------------\n";
         if (all_ok) {
-            std::cout << "\033[32m[PASS] ALL 13 QUANT, MICROSTRUCTURE & FAVÖK TESTS PASSED!\033[0m\n";
+            std::cout << "\033[32m[PASS] ALL 15 QUANT, MICROSTRUCTURE, FAVÖK & DATA QUALITY TESTS PASSED!\033[0m\n";
         } else {
             std::cout << "\033[31m[FAIL] SOME TESTS FAILED!\033[0m\n";
         }
@@ -547,6 +550,235 @@ private:
         auto gold_prof = FundamentalEngine::build_non_equity_profile(gold_asset, cls);
         ok &= check_cond(cls == AssetClassType::CommodityOrFuture && !gold_prof.is_available && !gold_prof.has_ebitda,
                          "Commodity profile verified (GRAM-ALTIN.TL): CommodityOrFuture, no corporate balance sheet");
+
+        return ok;
+    }
+
+    static bool test_data_quality_and_alerts() {
+        std::cout << "\n[TEST 14] Data Quality Telemetry, Scoring Integrity, Alerts & Normalization:\n";
+        bool ok = true;
+
+        auto has_alert = [](const HealthSummary& hs, const std::string& code) {
+            for (const auto& a : hs.alerts) {
+                if (a.code == code) return true;
+            }
+            return false;
+        };
+
+        // 1. Silent-zero guard: empty API & FX telemetry MUST cap overall score & raise Critical alerts
+        DataQualityDashboard::reset();
+        RealTimeAssetData spy_dummy;
+        spy_dummy.symbol = "SPY";
+        spy_dummy.is_live = true;
+        spy_dummy.raw_bar_count = 23;
+        spy_dummy.historical_prices.assign(23, 500.0);
+        spy_dummy.historical_raw_closes.assign(23, 500.0);
+        DataQualityDashboard::record_asset_quality(spy_dummy);
+
+        auto h_empty = DataQualityDashboard::evaluate_health();
+        ok &= check_cond(h_empty.api_score == 0.0 && h_empty.fx_score == 0.0 &&
+                         h_empty.overall_score <= 0.45 && h_empty.has_critical() &&
+                         has_alert(h_empty, "API_TELEMETRY_EMPTY") &&
+                         has_alert(h_empty, "FX_TELEMETRY_EMPTY") &&
+                         has_alert(h_empty, "PILLAR_ZERO"),
+                         std::format("Zero API/FX telemetry prevented inflated score (overall={:.2f}) and raised Critical alerts",
+                                     h_empty.overall_score));
+
+        // 2. Fallback FX & offline endpoint/asset detection
+        DataQualityDashboard::reset();
+        for (const auto& [src, ep] : DataQualityTelemetry::expected_endpoints()) {
+            bool ep_ok = (src != "Yahoo v10 QuoteSummary");
+            DataQualityDashboard::record_fetch(src, ep, ep_ok, std::chrono::milliseconds(120), false,
+                                               ep_ok ? "" : "HTTP 401", ep_ok ? 200 : 401);
+        }
+        DataQualityDashboard::record_fx_rate("USD/TRY", 38.0, false, "fallback");
+        DataQualityDashboard::record_fx_rate("EUR/TRY", 41.0, true, "live");
+        DataQualityDashboard::record_fx_rate("EUR/USD", 1.08, true, "live");
+        DataQualityDashboard::record_fx_rate("TRY/USD", 1.0 / 38.0, false, "fallback");
+        DataQualityDashboard::record_fx_rate("TRY/EUR", 1.0 / 41.0, true, "live (inv)");
+
+        RealTimeAssetData fail_asset;
+        fail_asset.symbol = "FAIL.IS";
+        fail_asset.is_live = false;
+        fail_asset.raw_bar_count = 10;
+        fail_asset.historical_prices.assign(10, 100.0);
+        DataQualityDashboard::record_asset_quality(fail_asset);
+
+        auto h_deg = DataQualityDashboard::evaluate_health();
+        ok &= check_cond(h_deg.overall_score < 0.50 && h_deg.has_critical() &&
+                         has_alert(h_deg, "API_ENDPOINT_OFFLINE") &&
+                         has_alert(h_deg, "FX_FALLBACK_ACTIVE") &&
+                         has_alert(h_deg, "ASSET_OFFLINE"),
+                         std::format("Offline endpoint, fallback FX & offline asset detected (overall={:.2f}, alerts={})",
+                                     h_deg.overall_score, h_deg.alerts.size()));
+
+        // 3. Null-bar counting & symbol normalization in get_inline_status ("GRAM-ALTIN" -> "GRAM-ALTIN.TL")
+        DataQualityDashboard::reset();
+        std::string null_json = R"({
+          "chart": {
+            "result": [{
+              "meta": { "currency": "USD", "symbol": "NUL.TEST", "regularMarketPrice": 105.0, "gmtoffset": 0 },
+              "timestamp": [1704153600, 1704240000, 1704326400, 1704412800, 1704672000, 1704758400],
+              "indicators": {
+                "quote": [{
+                  "open":   [100.0, 101.0, 102.0, 103.0, 104.0, null],
+                  "high":   [101.0, 102.0, 103.0, 104.0, 105.0, null],
+                  "low":    [99.0,  100.0, 101.0, 102.0, 103.0, null],
+                  "close":  [100.5, 101.5, 102.5, 103.5, 104.5, null],
+                  "volume": [1000, 1100, 1200, 1300, 1400, 0]
+                }]
+              }
+            }],
+            "error": null
+          }
+        })";
+        RealTimeAssetData null_parsed;
+        bool np_ok = LiveMarketDataClient::parse_yahoo_chart_json(null_json, null_parsed);
+        DataQualityDashboard::record_asset_quality(null_parsed);
+
+        RealTimeAssetData gold_live;
+        gold_live.symbol = "GRAM-ALTIN.TL";
+        gold_live.is_live = true;
+        gold_live.raw_bar_count = 22;
+        gold_live.historical_prices.assign(22, 6500.0);
+        gold_live.is_synthetic_metal = true;
+        gold_live.underlying_usdtry = 50.0;
+        DataQualityDashboard::record_asset_quality(gold_live);
+
+        std::string gold_status = DataQualityDashboard::get_inline_status("GRAM-ALTIN");
+        std::string trunc_ok = DataQualityTelemetry::utf8_truncate("query2.finance.yahoo.com/v10/finance/quoteSummary", 20);
+        ok &= check_cond(np_ok && null_parsed.raw_bar_count == 6 && null_parsed.null_bars_skipped == 1 &&
+                         gold_status.find("Live:Y") != std::string::npos &&
+                         gold_status.find("Bars:22") != std::string::npos &&
+                         trunc_ok == "query2.finance.yaho…",
+                         std::format("Null-bar counter (1/6), UTF-8 truncate & GRAM-ALTIN inline lookup verified ({})", gold_status));
+
+        // 4. End-to-end live dashboard pipeline check
+        DataQualityDashboard::reset();
+        LiveMarketDataClient client;
+        std::vector<std::string> syms = {"SPY", "AAPL", "THYAO.IS", "GRAM-ALTIN", "BTC-USD"};
+        for (const auto& s : syms) {
+            auto d = client.fetch_asset(s, "1mo");
+            auto f = FundamentalEngine::fetch_fundamentals(client, d);
+            DataQualityDashboard::record_asset_quality(d, &f);
+            NewsSentimentEngine::get_asset_sentiment(d.symbol, d.long_name, client);
+        }
+        client.fetch_treasury_yields();
+        client.get_fx_rate("USD", "TRY");
+        client.get_fx_rate("EUR", "TRY");
+        client.get_fx_rate("EUR", "USD");
+        client.get_fx_rate("TRY", "USD");
+        client.get_fx_rate("TRY", "EUR");
+
+        auto h_live = DataQualityDashboard::evaluate_health();
+        std::string live_gold_inline = DataQualityDashboard::get_inline_status("GRAM-ALTIN");
+        ok &= check_cond(h_live.api_tracked_count == 5 && h_live.fx_tracked_count == 5 &&
+                         h_live.asset_tracked_count == 5 &&
+                         h_live.api_score > 0.50 && h_live.fx_score > 0.50 &&
+                         h_live.asset_score > 0.50 && h_live.overall_score > 0.50 &&
+                         live_gold_inline.find("Live:Y") != std::string::npos,
+                         std::format("Live telemetry pipeline populated (API:{:.2f}, FX:{:.2f}, Asset:{:.2f}, Overall:{:.2f})",
+                                     h_live.api_score, h_live.fx_score, h_live.asset_score, h_live.overall_score));
+
+        return ok;
+    }
+
+    static bool test_live_intraday_cache_and_yield_wiring() {
+        std::cout << "\n[TEST 15] Testing Active Intraday Bar Recovery, Dynamic Cache & Live Yield Wiring...\n";
+        bool ok = true;
+
+        // 1. Live BIST intraday trailing bar recovery + chartPreviousClose isolation
+        std::string thyao_json = R"({
+          "chart": {
+            "result": [{
+              "meta": {
+                "currency": "TRY",
+                "symbol": "THYAO.IS",
+                "regularMarketPrice": 320.25,
+                "previousClose": null,
+                "chartPreviousClose": 286.25,
+                "regularMarketTime": 1794582590,
+                "gmtoffset": 10800
+              },
+              "timestamp": [1794258000, 1794344400, 1794430800, 1794551400],
+              "indicators": {
+                "quote": [{
+                  "open":   [295.0, 297.0, 299.0, 315.75],
+                  "high":   [298.0, 300.0, 302.0, 323.50],
+                  "low":    [294.0, 296.0, 298.0, 315.00],
+                  "close":  [296.0, 298.0, 300.0, null],
+                  "volume": [1000000, 1100000, 1200000, 29057838]
+                }]
+              }
+            }],
+            "error": null
+          }
+        })";
+
+        RealTimeAssetData parsed;
+        bool p_ok = LiveMarketDataClient::parse_yahoo_chart_json(thyao_json, parsed);
+        ok &= check_cond(p_ok && parsed.null_bars_skipped == 0 &&
+                         parsed.historical_prices.size() == 4 &&
+                         std::abs(parsed.historical_prices.back() - 320.25) < 1e-6 &&
+                         std::abs(parsed.historical_highs.back() - 323.50) < 1e-6 &&
+                         std::abs(parsed.historical_lows.back() - 315.00) < 1e-6 &&
+                         std::abs(parsed.previous_close - 300.0) < 1e-6,
+                         std::format("THYAO trailing intraday bar recovered (bars={}, last={:.2f}, prevClose={:.2f} != chartPrev 286.25)",
+                                     parsed.historical_prices.size(),
+                                     parsed.historical_prices.empty() ? 0.0 : parsed.historical_prices.back(),
+                                     parsed.previous_close));
+
+        // 2. Dynamic Fundamental recomputation on spot change + cache reset
+        LiveMarketDataClient client;
+        client.clear_caches();
+        FundamentalEngine::clear_cache();
+
+        RealTimeAssetData aapl = client.fetch_asset_smart("AAPL", "1mo");
+        double orig_spot = (aapl.current_price > 0.0) ? aapl.current_price : 200.0;
+        aapl.current_price = orig_spot;
+        auto f1 = FundamentalEngine::fetch_fundamentals(client, aapl);
+        RealTimeAssetData aapl_bumped = aapl;
+        aapl_bumped.current_price = orig_spot * 1.25;
+        auto f2 = FundamentalEngine::fetch_fundamentals(client, aapl_bumped);
+
+        if (f1.is_available && !std::isnan(f1.pe_ratio) && f1.pe_ratio > 0.0) {
+            double ratio = f2.pe_ratio / f1.pe_ratio;
+            ok &= check_cond(ratio > 1.23 && ratio < 1.27,
+                             std::format("Fundamental cache dynamically recomputed P/E on +25% spot change ({:.2f} -> {:.2f})",
+                                         f1.pe_ratio, f2.pe_ratio));
+        } else {
+            ok &= check_cond(f2.is_available == f1.is_available,
+                             "Fundamental cache handled offline/partial state cleanly without crashing");
+        }
+
+        // 3. Yield-curve sensitivity in QuantForecastEngine
+        RealTimeAssetData spy_synth;
+        spy_synth.symbol = "SPY";
+        spy_synth.currency_code = "USD";
+        spy_synth.is_live = true;
+        for (int i = 0; i < 65; ++i) {
+            double p = 500.0 + 0.35 * i + ((i % 2 == 0) ? 0.6 : -0.4);
+            spy_synth.historical_prices.push_back(p);
+            spy_synth.historical_highs.push_back(p + 1.5);
+            spy_synth.historical_lows.push_back(p - 1.5);
+            spy_synth.historical_opens.push_back(p - 0.2);
+            spy_synth.historical_volumes.push_back(50000000.0);
+        }
+        spy_synth.current_price = spy_synth.historical_prices.back();
+        spy_synth.previous_close = spy_synth.historical_prices[spy_synth.historical_prices.size() - 2];
+
+        TreasuryYieldCurveData yc_low{0.010, 0.020, 0.025, 0.030, true};
+        TreasuryYieldCurveData yc_high{0.055, 0.050, 0.050, 0.052, true};
+
+        auto fc_low = QuantForecastEngine::forecast_for_trading_days(
+            spy_synth, 63, 0.0, false, nullptr, "3A", 90, &yc_low);
+        auto fc_high = QuantForecastEngine::forecast_for_trading_days(
+            spy_synth, 63, 0.0, false, nullptr, "3A", 90, &yc_high);
+
+        ok &= check_cond(fc_high.expected_return_pct > fc_low.expected_return_pct &&
+                         std::isfinite(fc_high.target_price),
+                         std::format("USD forecast carry wired to live Treasury yields (1% -> {:+.2f}%, 5.5% -> {:+.2f}%)",
+                                     fc_low.expected_return_pct, fc_high.expected_return_pct));
 
         return ok;
     }

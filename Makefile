@@ -47,7 +47,7 @@ CXXFLAGS := $(MAC_FLAGS) \
 
 LDFLAGS := -lcurl -pthread
 
-SRCS := src/main.cpp
+SRCS := src/main.cpp src/data_quality.cpp
 TARGET := bin/quant_suite
 TARGET_ASAN := bin/quant_suite_asan
 

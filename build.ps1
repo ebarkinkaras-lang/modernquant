@@ -43,7 +43,7 @@ Write-Host "[*] Modern C++20 quant_suite derleniyor..." -ForegroundColor Cyan
     -I deps\boost_1_84_0 `
     -I deps\eigen-3.4.0 `
     -I deps\curl-8.23.0_8-win64-mingw\include `
-    src\main.cpp `
+    src\main.cpp src\data_quality.cpp `
     -L deps\curl-8.23.0_8-win64-mingw\lib `
     -lcurl -lws2_32 -lcrypt32 -lwldap32 `
     -o bin\quant_suite.exe

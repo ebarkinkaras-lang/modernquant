@@ -17,6 +17,7 @@
 #include "quant/trading_signals.hpp"
 #include "quant/live_market_data.hpp"
 #include "quant/fundamentals.hpp"
+#include "quant/news_sentiment.hpp"
 #include "quant/test_suite.hpp"
 #include "quant/theme_engine.hpp"
 #include "quant/terminal_chart.hpp"
@@ -27,6 +28,7 @@
 #include "quant/forecast_engine.hpp"
 #include "quant/forecast_backtest.hpp"
 #include "quant/alpha_screener.hpp"
+#include "quant/data_quality.hpp"
 #include "quant/i18n.hpp"
 
 #ifdef _WIN32
@@ -41,6 +43,12 @@
 #include <iomanip>
 #include <format>
 #include <chrono>
+#include <cmath>
+#include <numeric>
+#include <array>
+#include <map>
+#include <sstream>
+#include <unordered_map>
 #include <ranges>
 #include <thread>
 
@@ -141,6 +149,9 @@ void print_menu() {
         {"8",  "[RISK]",
          I18n::tr("Drawdown & VaR Analizi", "Drawdown & VaR Risk Analytics", "Drawdown- & VaR-Risikoanalyse"),
          I18n::tr("Monte Carlo Shuffle, Parametrik & Nonparametrik Max DD", "Monte Carlo Shuffle, Parametric & Historical Max DD", "Monte-Carlo-Shuffle, Parametrischer & Hist. Max DD")},
+        {"D",  "[QUALITY]",
+         I18n::tr("Veri Kalite & Kaynak Sağlık Panosu", "Data Quality & Source Health Dashboard", "Datenqualitäts- & Quellen-Gesundheitspanel"),
+         I18n::tr("API önbellek, FX kuru yaşı, veri bütünlüğü ve tamlık metrikleri", "API cache, FX rate age, data integrity & completeness metrics", "API-Cache, FX-Kursalter, Datenintegrität & Vollständigkeitsmetriken")},
         {"L",  "[LANG]",
          I18n::tr("Dil / Language / Sprache", "Language / Dil / Sprache", "Sprache / Language / Dil"),
          I18n::tr("Türkçe 🇹🇷 / English 🇬🇧 / Deutsch 🇩🇪", "Switch interface language", "Aktive Oberflächensprache umschalten")},
@@ -219,21 +230,8 @@ void run_forecast_interactive(LiveMarketDataClient& client) {
                           std::format("Live 6-Monats-OHLCV, News & TTM-EBITDA werden geladen ({})... ", sym))
               << std::flush;
 
-    auto data = client.fetch_asset(sym, "6mo");
-    if ((!data.is_live || data.current_price <= 0.0) &&
-        sym.find('.') == std::string::npos && sym.find('-') == std::string::npos && sym.find('=') == std::string::npos) {
-        auto bist_try = client.fetch_asset(sym + ".IS", "6mo");
-        if (bist_try.is_live && bist_try.current_price > 0.0) {
-            data = std::move(bist_try);
-            sym = data.symbol;
-        } else {
-            auto xetra_try = client.fetch_asset(sym + ".DE", "6mo");
-            if (xetra_try.is_live && xetra_try.current_price > 0.0) {
-                data = std::move(xetra_try);
-                sym = data.symbol;
-            }
-        }
-    }
+    auto data = client.fetch_asset_smart(sym, "6mo");
+    sym = data.symbol;
 
     if (data.current_price <= 0.0) {
         std::cout << pal.red_rgb << "\n  ❌ "
@@ -246,9 +244,11 @@ void run_forecast_interactive(LiveMarketDataClient& client) {
 
     auto sent = NewsSentimentEngine::get_asset_sentiment(data.symbol, data.long_name, client);
     auto fund = FundamentalEngine::fetch_fundamentals(client, data);
+    DataQualityDashboard::record_asset_quality(data, &fund);
+    DataQualityDashboard::record_news_fetch(data.symbol, sent.has_live_news, sent.headlines.size());
     TreasuryYieldCurveData yc;
     bool has_yc = false;
-    if (fund.asset_class == AssetClassType::CommodityOrFuture) {
+    if (fund.asset_class == AssetClassType::CommodityOrFuture || data.currency_code == "USD") {
         yc = client.fetch_treasury_yields();
         has_yc = true;
     }
@@ -273,7 +273,7 @@ void run_forecast_interactive(LiveMarketDataClient& client) {
             int d = std::stoi(days_str);
             if (d > 0) {
                 auto custom_res = QuantForecastEngine::forecast_for_days(
-                    data, sent.sentiment_score, d, "", sent.has_live_news, &fund
+                    data, sent.sentiment_score, d, "", sent.has_live_news, &fund, has_yc ? &yc : nullptr
                 );
                 std::string card_hdr = I18n::tr(
                     std::format("║  🎯 {} TAKVİM GÜNÜ ({} İŞ GÜNÜ) ÖZEL VADE TAHMİN KARTI", d, custom_res.trading_days),
@@ -325,13 +325,14 @@ void run_chart_interactive(LiveMarketDataClient& client) {
                           std::format("Fetching market data ({})... ", sym),
                           std::format("Marktdaten werden geladen ({})... ", sym))
               << std::flush;
-    auto data = client.fetch_asset(sym, "6mo");
+    auto data = client.fetch_asset_smart(sym, "6mo");
     if (data.current_price <= 0.0 || data.historical_prices.empty()) {
         std::cout << pal.red_rgb << "\n  ❌ Geçerli fiyat serisi bulunamadı!\n" << pal.reset_code;
         return;
     }
     auto fund = FundamentalEngine::fetch_fundamentals(client, data);
     auto curve = client.fetch_treasury_yields();
+    DataQualityDashboard::record_asset_quality(data, &fund);
     std::cout << pal.green_rgb << I18n::tr("TAMAMLANDI!\n", "COMPLETED!\n", "ABGESCHLOSSEN!\n") << pal.reset_code;
 
     TerminalChartEngine::render_asset(data, 12, 28);
@@ -358,13 +359,14 @@ void run_live_data_interactive(LiveMarketDataClient& client) {
                           std::format("Querying live REST API & Fundamentals: {}... ", sym),
                           std::format("Live-REST-API & Bilanzdaten werden geladen: {}... ", sym))
               << std::flush;
-    auto data = client.fetch_asset(sym, "6mo");
+    auto data = client.fetch_asset_smart(sym, "6mo");
     if (data.current_price <= 0.0) {
         std::cout << pal.red_rgb << "\n  ❌ Sembol bulunamadı!\n" << pal.reset_code;
         return;
     }
     auto fund = FundamentalEngine::fetch_fundamentals(client, data);
     auto curve = client.fetch_treasury_yields();
+    DataQualityDashboard::record_asset_quality(data, &fund);
     std::cout << pal.green_rgb << "OK!\n" << pal.reset_code;
 
     std::vector<std::string> lines = {
@@ -474,21 +476,31 @@ void run_backtest_interactive(LiveMarketDataClient& client) {
             std::format("\nScanning 2-year historical rolling windows and running exact out-of-sample validation for '{}'...\n", sym),
             std::format("\n2-Jahres-Vergangenheitsfenster werden für '{}' out-of-sample validiert...\n", sym)
         );
+        auto snap = client.fetch_asset_smart(sym, "6mo");
+        sym = snap.symbol;
         auto rep = ForecastBacktestEngine::run_walk_forward_backtest(client, sym, horizon, "2y");
         ForecastBacktestEngine::render_backtest_report(rep);
-        auto snap = client.fetch_asset(sym, "6mo");
         if (snap.current_price > 0.0) {
             auto fund = FundamentalEngine::fetch_fundamentals(client, snap);
             auto curve = client.fetch_treasury_yields();
+            DataQualityDashboard::record_asset_quality(snap, &fund);
             FundamentalEngine::render_fundamental_card(fund, snap, &curve);
         }
         return;
     }
 
-    auto data = client.fetch_asset(sym, "2y");
+    auto data = client.fetch_asset_smart(sym, "2y");
     if (data.historical_prices.size() < 25) {
         std::cout << pal.dim_rgb << I18n::tr("Alternatif seri alınıyor...", "Fetching fallback series...", "Alternativserie wird geladen...") << pal.reset_code << "\n";
-        data = client.fetch_asset(sym, "1y");
+        data = client.fetch_asset_smart(data.symbol, "1y");
+    }
+    DataQualityDashboard::record_asset_quality(data);
+    if (!data.is_live) {
+        std::cout << pal.red_rgb
+                  << I18n::tr("\n  ⚠ UYARI: Canlı veri alınamadı, backtest ÇEVRİMDIŞI simülasyon serisi üzerinde çalışıyor!\n",
+                              "\n  ⚠ WARNING: Live data unavailable, backtest running on OFFLINE simulated series!\n",
+                              "\n  ⚠ WARNUNG: Keine Live-Daten verfügbar, Backtest läuft auf OFFLINE-Simulationsdaten!\n")
+                  << pal.reset_code;
     }
 
     StrategyType st = StrategyType::SmaCrossover;
@@ -508,37 +520,151 @@ void run_backtest_interactive(LiveMarketDataClient& client) {
     };
     te.print_box(I18n::tr("BACKTEST RAPORU", "BACKTEST REPORT", "BACKTEST-BERICHT"), lines);
 
-    if (data.current_price > 0.0) {
+    if (data.current_price <= 0.0) {
+        std::cout << pal.red_rgb << "\n  ❌ " << sym << " için fiyat verisi alınamadı!\n" << pal.reset_code;
+    } else if (!data.historical_prices.empty()) {
         auto fund = FundamentalEngine::fetch_fundamentals(client, data);
         auto curve = client.fetch_treasury_yields();
+        DataQualityDashboard::record_asset_quality(data, &fund);
         FundamentalEngine::render_fundamental_card(fund, data, &curve);
     }
 }
 
-void run_live_signals_interactive() {
+namespace {
+
+int64_t bar_day_key(const RealTimeAssetData& d, size_t idx) {
+    if (idx < d.day_keys.size()) return d.day_keys[idx];
+    if (idx < d.timestamps.size()) return d.timestamps[idx] / 86400LL;
+    return static_cast<int64_t>(idx);
+}
+
+std::string format_bar_date(const RealTimeAssetData& d, size_t idx) {
+    if (idx < d.timestamps.size() && d.timestamps[idx] > 0) {
+        std::time_t tt = static_cast<std::time_t>(d.timestamps[idx]);
+        if (std::tm* tm_p = std::gmtime(&tt)) {
+            return std::format("{:04d}-{:02d}-{:02d}",
+                               tm_p->tm_year + 1900, tm_p->tm_mon + 1, tm_p->tm_mday);
+        }
+    }
+    return std::format("Bar #{:<5}", idx + 1);
+}
+
+std::string safe_ccy_display(const RealTimeAssetData& d) {
+    if (!d.currency_display.empty()) return d.currency_display;
+    return LiveMarketDataClient::currency_display_for(
+        LiveMarketDataClient::infer_currency_code(d.symbol), d.symbol);
+}
+
+double resolve_risk_free_rate(const RealTimeAssetData& asset,
+                              const TreasuryYieldCurveData& yc,
+                              std::string& out_source) {
+    if (asset.currency_code == "TRY") {
+        out_source = I18n::tr("TRY Politika/Tahvil Proxy (%42.5)",
+                              "TRY Policy/Bond Proxy (42.5%)",
+                              "TRY-Zins-Proxy (42.5%)");
+        return 0.425;
+    }
+    if (asset.currency_code == "EUR") {
+        out_source = I18n::tr("EUR Risk-Free Proxy (%3.25)",
+                              "EUR Risk-Free Proxy (3.25%)",
+                              "EUR-Referenzzins (3.25%)");
+        return 0.0325;
+    }
+    out_source = yc.is_live
+        ? I18n::tr("ABD 3A Hazine ^IRX [CANLI]", "US 3M T-Bill ^IRX [LIVE]", "US-3M-Treasury ^IRX [LIVE]")
+        : I18n::tr("ABD 3A Varsayılan (%4.5)", "US 3M Default (4.5%)", "US-3M-Standard (4.5%)");
+    return (yc.three_month_yield > 0.0) ? yc.three_month_yield : 0.045;
+}
+
+struct HistoricalFxSeries {
+    double spot_fx{1.0};
+    std::map<int64_t, double> daily_rates;
+
+    double rate_on(int64_t day_key) const {
+        if (daily_rates.empty()) return spot_fx;
+        auto it = daily_rates.upper_bound(day_key);
+        if (it == daily_rates.begin()) return daily_rates.begin()->second;
+        return std::prev(it)->second;
+    }
+};
+
+HistoricalFxSeries build_fx_series(LiveMarketDataClient& client,
+                                   const std::string& from_ccy,
+                                   const std::string& to_ccy,
+                                   const std::string& range = "6mo") {
+    HistoricalFxSeries fx;
+    if (from_ccy.empty() || to_ccy.empty() || from_ccy == to_ccy) return fx;
+    fx.spot_fx = client.get_fx_rate(from_ccy, to_ccy);
+    if (fx.spot_fx <= 0.0) fx.spot_fx = 1.0;
+
+    auto direct = client.fetch_asset(from_ccy + to_ccy + "=X", range);
+    if (direct.is_live && !direct.historical_prices.empty()) {
+        for (size_t i = 0; i < direct.historical_prices.size(); ++i) {
+            if (direct.historical_prices[i] > 0.0) {
+                fx.daily_rates[bar_day_key(direct, i)] = direct.historical_prices[i];
+            }
+        }
+        return fx;
+    }
+    auto inverse = client.fetch_asset(to_ccy + from_ccy + "=X", range);
+    if (inverse.is_live && !inverse.historical_prices.empty()) {
+        for (size_t i = 0; i < inverse.historical_prices.size(); ++i) {
+            if (inverse.historical_prices[i] > 0.0) {
+                fx.daily_rates[bar_day_key(inverse, i)] = 1.0 / inverse.historical_prices[i];
+            }
+        }
+    }
+    return fx;
+}
+
+} // namespace
+
+void run_live_signals_interactive(LiveMarketDataClient& client) {
     auto& te = ThemeEngine::instance();
     const auto& pal = te.palette();
-    std::cout << "\n" << pal.glow_rgb << "--- [3] BOOST ACCUMULATORS GERÇEK ZAMANLI İZLEYİCİ ---" << pal.reset_code << "\n";
-    std::cout << "Boost Accumulators ile streaming veri akışı simüle ediliyor...\n";
+    std::cout << "\n" << pal.glow_rgb << "--- [3] BOOST ACCUMULATORS GERÇEK ZAMANLI SİNYAL İZLEYİCİ ---" << pal.reset_code << "\n";
+    std::cout << "Sembol girin (örn: SPY, THYAO.IS, NVDA, BTC-USD, GRAM-ALTIN) [Default: SPY]: ";
+    std::string sym;
+    std::getline(std::cin, sym);
+    if (sym.empty()) sym = "SPY";
+    sym = LiveMarketDataClient::normalize_symbol(sym);
+
+    auto data = client.fetch_asset_smart(sym, "1mo");
+    DataQualityDashboard::record_asset_quality(data);
+    if (data.historical_prices.empty()) {
+        std::cout << pal.red_rgb << "\n  ❌ " << data.symbol << " için tarihsel seri alınamadı!\n" << pal.reset_code;
+        return;
+    }
+
+    const auto& closes = data.historical_prices;
+    std::string ccy = safe_ccy_display(data);
+    std::string badge = data.is_live
+        ? (pal.green_rgb + "[CANLI PİYASA VERİSİ]" + pal.reset_code)
+        : (pal.red_rgb + "[ÇEVRİMDIŞI SİMÜLASYON]" + pal.reset_code);
+    std::cout << std::format("  Varlık: {} {} │ Toplam Bar: {}\n\n", data.symbol, badge, closes.size());
 
     StreamingIndicators ind(5, 1.5, 3, 5);
-    std::vector<double> stream_prices = {
-        100.00, 103.49, 102.82, 106.86, 104.91, 107.38, 107.46, 111.01,
-        112.01, 114.11, 116.91, 121.74, 120.04, 120.24, 120.12, 120.61,
-        121.31, 120.47, 121.25, 119.25, 118.11, 120.36, 117.36, 119.12
-    };
+    size_t start = (closes.size() > 26) ? (closes.size() - 26) : 0;
 
-    std::cout << pal.dim_rgb << "  Tik Fiyat  Ortalama   Üst Bant   Alt Bant   Fast MA  Slow MA   Sinyal\n"
-              << "  ─────────────────────────────────────────────────────────────────────────\n" << pal.reset_code;
+    std::cout << pal.dim_rgb << "  Tarih      Fiyat       Ort.(5g)    Üst Bant    Alt Bant    Fast MA     Slow MA     Sinyal\n"
+              << "  ───────────────────────────────────────────────────────────────────────────────────────────────\n" << pal.reset_code;
 
-    for (double p : stream_prices) {
-        auto pt = ind.update(p);
+    for (size_t i = start; i < closes.size(); ++i) {
+        auto pt = ind.update(closes[i]);
+        std::string dt = format_bar_date(data, i);
         std::string sig_str = (pt.signal == 1) ? (pal.green_rgb + "[AL / GOLDEN]" + pal.reset_code) :
                               (pt.signal == -1) ? (pal.red_rgb + "[SAT / DEATH]" + pal.reset_code) : (pal.dim_rgb + "BEKLE" + pal.reset_code);
-        std::cout << std::format("  ${:6.2f}    ${:6.2f}    ${:6.2f}    ${:6.2f}    ${:6.2f}  ${:6.2f}   {}\n",
-                                 pt.price, pt.rolling_mean, pt.upper_band, pt.lower_band,
-                                 pt.fast_ma, pt.slow_ma, sig_str);
-        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        std::cout << std::format("  {:<10} {:>8.2f}{:<2} {:>8.2f}{:<2} {:>8.2f}{:<2} {:>8.2f}{:<2} {:>8.2f}{:<2} {:>8.2f}{:<2}  {}\n",
+                                 dt, pt.price, ccy, pt.rolling_mean, ccy, pt.upper_band, ccy,
+                                 pt.lower_band, ccy, pt.fast_ma, ccy, pt.slow_ma, ccy, sig_str);
+    }
+    if (data.current_price > 0.0 && std::abs(data.current_price - closes.back()) > 1e-4) {
+        auto pt = ind.update(data.current_price);
+        std::string sig_str = (pt.signal == 1) ? (pal.green_rgb + "[AL / GOLDEN]" + pal.reset_code) :
+                              (pt.signal == -1) ? (pal.red_rgb + "[SAT / DEATH]" + pal.reset_code) : (pal.dim_rgb + "BEKLE" + pal.reset_code);
+        std::cout << std::format("  {:<10} {:>8.2f}{:<2} {:>8.2f}{:<2} {:>8.2f}{:<2} {:>8.2f}{:<2} {:>8.2f}{:<2} {:>8.2f}{:<2}  {}\n",
+                                 "ANLIK", pt.price, ccy, pt.rolling_mean, ccy, pt.upper_band, ccy,
+                                 pt.lower_band, ccy, pt.fast_ma, ccy, pt.slow_ma, ccy, sig_str);
     }
 }
 
@@ -555,14 +681,35 @@ void run_derivatives_module(LiveMarketDataClient& client) {
     std::getline(std::cin, sub_choice);
     if (sub_choice.empty()) sub_choice = "1";
 
+    std::cout << "Dayanak varlık sembolü (örn: SPY, NVDA, AAPL, THYAO.IS) [Default: SPY]: ";
+    std::string sym;
+    std::getline(std::cin, sym);
+    if (sym.empty()) sym = "SPY";
+    sym = LiveMarketDataClient::normalize_symbol(sym);
+
+    auto live = client.fetch_asset_smart(sym, "6mo");
+    auto fund = FundamentalEngine::fetch_fundamentals(client, live);
+    auto yc = client.fetch_treasury_yields();
+    DataQualityDashboard::record_asset_quality(live, &fund);
+
+    if (live.current_price <= 0.0) {
+        std::cout << pal.red_rgb << "\n  ❌ Dayanak varlık kotasyonu alınamadı!\n" << pal.reset_code;
+        return;
+    }
+
+    double spot = live.current_price;
+    double vol = (live.annualized_volatility > 0.01) ? live.annualized_volatility : 0.20;
+    std::string rate_src;
+    double rate = resolve_risk_free_rate(live, yc, rate_src);
+    double div = (!std::isnan(fund.dividend_yield_pct) && fund.dividend_yield_pct > 0.0 && fund.dividend_yield_pct < 25.0)
+        ? (fund.dividend_yield_pct / 100.0)
+        : (live.symbol == "SPY" ? 0.013 : 0.0);
+    std::string ccy = safe_ccy_display(live);
+    std::string live_tag = live.is_live ? "[CANLI]" : "[ÇEVRİMDIŞI]";
+
     if (sub_choice == "1") {
-        auto live = client.fetch_asset("SPY");
-        double spot = live.current_price;
-        double strike = spot;
+        double strike = std::round(spot * 100.0) / 100.0;
         double time_to_exp = 0.5;
-        double vol = live.annualized_volatility;
-        double rate = 0.045;
-        double div = 0.015;
 
         BlackScholes call_bs{strike, spot, time_to_exp, PayoffType::Call, rate, div};
         BlackScholes put_bs{strike, spot, time_to_exp, PayoffType::Put, rate, div};
@@ -573,154 +720,357 @@ void run_derivatives_module(LiveMarketDataClient& client) {
         auto p_greeks  = put_bs.risk_values(vol);
 
         std::vector<std::string> lines = {
-            std::format("Spot: ${:.2f}  │  Kullanım (K): ${:.2f}  │  Vade: {:.2f}y", spot, strike, time_to_exp),
-            std::format("Volatilite: {:.2f}%  │  Risksiz Faiz: {:.2f}%  │  Temettü: {:.2f}%", vol * 100.0, rate * 100.0, div * 100.0),
-            "────────────────────────────────────────────────────────────────────────",
-            std::format("CALL PRİMİ: {}${:.4f}{}     PUT PRİMİ: {}${:.4f}{}", pal.glow_rgb, c_price, pal.reset_code, pal.glow_rgb, p_price, pal.reset_code),
-            "────────────────────────────────────────────────────────────────────────",
+            std::format("Dayanak: {} {}  │  Spot: {:.2f} {}  │  Strike (K): {:.2f} {}  │  Vade: {:.2f}y",
+                        live.symbol, live_tag, spot, ccy, strike, ccy, time_to_exp),
+            std::format("Gerçekleşen Vol: {:.2f}%  │  Faiz ({}): {:.2f}%  │  Temettü: {:.2f}%",
+                        vol * 100.0, rate_src, rate * 100.0, div * 100.0),
+            "────────────────────────────────────────────────────────────────────────────",
+            std::format("CALL PRİMİ: {}{:.4f} {}{}     PUT PRİMİ: {}{:.4f} {}{}",
+                        pal.glow_rgb, c_price, ccy, pal.reset_code, pal.glow_rgb, p_price, ccy, pal.reset_code),
+            "────────────────────────────────────────────────────────────────────────────",
             std::format("Delta (Δ):   Call: {:<12.4f} │ Put: {:<12.4f}", c_greeks[RiskValues::Delta], p_greeks[RiskValues::Delta]),
             std::format("Gamma (Γ):   Call: {:<12.4f} │ Put: {:<12.4f}", c_greeks[RiskValues::Gamma], p_greeks[RiskValues::Gamma]),
             std::format("Vega:        Call: {:<12.4f} │ Put: {:<12.4f}", c_greeks[RiskValues::Vega],  p_greeks[RiskValues::Vega]),
             std::format("Theta (θ):   Call: {:<12.4f} │ Put: {:<12.4f}", c_greeks[RiskValues::Theta], p_greeks[RiskValues::Theta]),
             std::format("Rho (ρ):     Call: {:<12.4f} │ Put: {:<12.4f}", c_greeks[RiskValues::Rho],   p_greeks[RiskValues::Rho])
         };
-        te.print_box("BLACK-SCHOLES DEĞERLEME & GREEKS", lines);
+        te.print_box("CANLI BLACK-SCHOLES DEĞERLEME & GREEKS", lines);
     } else if (sub_choice == "2") {
-        BlackScholes bsc{95.0, 100.0, 0.25, PayoffType::Call, 0.05, 0.07};
-        double mkt_price = 6.20;
-        double iv = calculate_implied_volatility(bsc, mkt_price, 0.10, 0.25);
+        double strike = std::round(spot * 0.95 * 100.0) / 100.0;
+        double time_to_exp = 0.25;
+        BlackScholes bsc{strike, spot, time_to_exp, PayoffType::Call, rate, div};
+        double default_shock_vol = std::min(1.50, vol * 1.12);
+        double default_mkt_price = bsc(default_shock_vol);
+
+        std::cout << std::format("Gözlenen Call Piyasa Primi ({} K={:.2f} {}, T=0.25y) [Enter = {:.2f}]: ",
+                                 live.symbol, strike, ccy, default_mkt_price);
+        std::string p_str;
+        std::getline(std::cin, p_str);
+        double mkt_price = default_mkt_price;
+        if (!p_str.empty()) {
+            try {
+                double parsed = std::stod(p_str);
+                if (parsed > std::max(0.01, spot - strike * std::exp(-rate * time_to_exp))) mkt_price = parsed;
+            } catch (...) {}
+        }
+
+        double g1 = std::max(0.02, vol * 0.70);
+        double g2 = std::min(1.50, vol * 1.40);
+        double iv = calculate_implied_volatility(bsc, mkt_price, g1, g2);
         std::vector<std::string> lines = {
-            std::format("Piyasa Opsiyon Fiyatı:   ${:.2f}", mkt_price),
-            std::format("S=100, K=95, T=0.25y, r=5%, q=7%"),
-            std::format("Hesaplanan Zımni Oynaklık (IV): {}{:.2f}%{}", pal.glow_rgb, iv * 100.0, pal.reset_code),
-            std::format("Model Fiyatı Geri Çatımı: ${:.4f}", bsc(iv))
+            std::format("Dayanak: {} {}  │  Spot={:.2f} {}, Strike(K)={:.2f} {}, T=0.25y", live.symbol, live_tag, spot, ccy, strike, ccy),
+            std::format("Faiz ({}): {:.2f}%  │  Tarihsel Vol (HV): {:.2f}%", rate_src, rate * 100.0, vol * 100.0),
+            std::format("Piyasa Opsiyon Fiyatı:   {:.4f} {}", mkt_price, ccy),
+            std::format("Çözülen Zımni Oynaklık (IV): {}{:.2f}%{} (IV - HV: {:+.2f} puan)",
+                        pal.glow_rgb, iv * 100.0, pal.reset_code, (iv - vol) * 100.0),
+            std::format("Model Fiyatı Geri Çatımı:    {:.4f} {}", bsc(iv), ccy)
         };
         te.print_box("SECANT ROOT-FINDING IMPLIED VOLATILITY", lines);
     } else if (sub_choice == "3") {
-        OptionInfo opt_call{std::make_unique<CallPayoff>(75.0), 0.5};
-        MCOptionValuation mc{std::move(opt_call), 12, 0.25, 0.05, 0.075};
+        double strike = std::round(spot * 0.90 * 100.0) / 100.0;
+        double barrier = std::round(spot * 1.15 * 100.0) / 100.0;
+        double time_to_exp = 0.5;
+        OptionInfo opt_call{std::make_unique<CallPayoff>(strike), time_to_exp};
+        MCOptionValuation mc{std::move(opt_call), 12, vol, rate, div};
 
         auto t0 = std::chrono::high_resolution_clock::now();
-        double p_seq = mc.calc_price(100.0, 40000, 42);
+        double p_seq = mc.calc_price(spot, 40000, 42);
         auto t1 = std::chrono::high_resolution_clock::now();
         double ms_seq = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
         auto t2 = std::chrono::high_resolution_clock::now();
-        double p_par = mc.calc_price_par(100.0, 40000, 42);
+        double p_par = mc.calc_price_par(spot, 40000, 42);
         auto t3 = std::chrono::high_resolution_clock::now();
         double ms_par = std::chrono::duration<double, std::milli>(t3 - t2).count();
 
-        // Barrier option
-        OptionInfo opt_barr{std::make_unique<CallPayoff>(75.0), 0.5};
-        MCOptionValuation mc_barr{std::move(opt_barr), 12, 0.25, 0.05, 0.075,
-                                  BarrierType::up_and_out, 110.0};
-        double p_barr = mc_barr.calc_price_par(100.0, 40000, 42);
+        OptionInfo opt_barr{std::make_unique<CallPayoff>(strike), time_to_exp};
+        MCOptionValuation mc_barr{std::move(opt_barr), 12, vol, rate, div,
+                                  BarrierType::up_and_out, barrier};
+        double p_barr = mc_barr.calc_price_par(spot, 40000, 42);
 
         std::vector<std::string> lines = {
-            std::format("Senaryo Sayısı: 40,000 │ Zaman Adımı: 12"),
-            std::format("Sıralı Fiyatlama (1 Çekirdek):  {:.2f} ms │ Fiyat: ${:.4f}", ms_seq, p_seq),
-            std::format("Paralel Fiyatlama (std::async):  {:.2f} ms │ Fiyat: ${:.4f}", ms_par, p_par),
+            std::format("Dayanak: {} {}  │  Spot: {:.2f} {}  │  K: {:.2f} {}  │  σ: {:.2f}%",
+                        live.symbol, live_tag, spot, ccy, strike, ccy, vol * 100.0),
+            std::format("Senaryo: 40,000 │ Adım: 12 │ Faiz ({}): {:.2f}%", rate_src, rate * 100.0),
+            "────────────────────────────────────────────────────────────────────────────",
+            std::format("Sıralı Fiyatlama (1 Çekirdek):  {:.2f} ms │ Prim: {:.4f} {}", ms_seq, p_seq, ccy),
+            std::format("Paralel Fiyatlama (std::async):  {:.2f} ms │ Prim: {:.4f} {}", ms_par, p_par, ccy),
             std::format("Eşzamanlılık Hızlanması:        {}{:.2f}x HIZLI{}", pal.green_rgb, ms_seq / std::max(0.1, ms_par), pal.reset_code),
-            "────────────────────────────────────────────────────────────────────────",
-            std::format("Up-and-Out Bariyer (Sınır $110): ${:.4f} (İndirim: -${:.4f})", p_barr, p_par - p_barr)
+            "────────────────────────────────────────────────────────────────────────────",
+            std::format("Up-and-Out Bariyer (Sınır {:.2f} {}): {:.4f} {} (İndirim: -{:.4f} {})",
+                        barrier, ccy, p_barr, ccy, p_par - p_barr, ccy)
         };
         te.print_box("EŞZAMANLI MONTE CARLO & BARİYER DEĞERLEMESİ", lines);
     } else {
-        OptionInfo put_opt{std::make_unique<PutPayoff>(40.0), 1.0};
-        BinomialLatticePricer pricer{std::move(put_opt), 0.20, 0.06, 4};
-        double a_price = pricer.calc_price(36.0, OptType::American);
-        double e_price = pricer.calc_price(36.0, OptType::Euro);
+        double strike = std::round(spot * 1.10 * 100.0) / 100.0;
+        OptionInfo put_opt{std::make_unique<PutPayoff>(strike), 1.0};
+        BinomialLatticePricer pricer{std::move(put_opt), vol, rate, 40};
+        double a_price = pricer.calc_price(spot, OptType::American);
+        double e_price = pricer.calc_price(spot, OptType::Euro);
 
         std::vector<std::string> lines = {
-            std::format("Parametreler: S=36, K=40, T=1.0y, r=6%, vol=20%, Adım=4"),
-            std::format("Avrupa Tipi Put Değeri:    ${:.4f}", e_price),
-            std::format("Amerikan Tipi Put Değeri:  ${:.4f}", a_price),
-            std::format("Erken Egzersiz Primi:      {}{:.4f}{}", pal.glow_rgb, a_price - e_price, pal.reset_code)
+            std::format("Dayanak: {} {} │ S={:.2f} {}, K={:.2f} {}, T=1.0y, σ={:.2f}%, r={:.2f}%, N=40",
+                        live.symbol, live_tag, spot, ccy, strike, ccy, vol * 100.0, rate * 100.0),
+            std::format("Avrupa Tipi Put Değeri:    {:.4f} {}", e_price, ccy),
+            std::format("Amerikan Tipi Put Değeri:  {:.4f} {}", a_price, ccy),
+            std::format("Erken Egzersiz Primi:      {}{:.4f} {}{}", pal.glow_rgb, a_price - e_price, ccy, pal.reset_code)
         };
         te.print_box("BOOST MULTIARRAY BINOMIAL AĞAÇ DEĞERLEMESİ", lines);
     }
 }
 
-void run_portfolio_module() {
+void run_portfolio_module(LiveMarketDataClient& client) {
     auto& te = ThemeEngine::instance();
     const auto& pal = te.palette();
-    std::cout << "\n" << pal.glow_rgb << "--- [5] EIGEN PORTFÖY & RİSK ANALİZİ ---" << pal.reset_code << "\n";
+    std::cout << "\n" << pal.glow_rgb << "--- [5] EIGEN CANLI PORTFÖY KOVARYANS & CHOLESKY RİSK ANALİZİ ---" << pal.reset_code << "\n";
+    std::cout << "4 portföy sembolü girin (virgülle) [Default: SPY,QQQ,GLD,BTC-USD]: ";
+    std::string raw_syms;
+    std::getline(std::cin, raw_syms);
 
-    Eigen::Matrix3d corr;
-    corr << 1.0,  0.5,  0.25,
-            0.5,  1.0, -0.7,
-            0.25, -0.7, 1.0;
-    Eigen::Vector3d vols{0.20, 0.10, 0.40};
-    Eigen::Vector3d weights{0.60, -0.30, 0.70};
+    std::vector<std::string> syms;
+    if (!raw_syms.empty()) {
+        std::stringstream ss(raw_syms);
+        std::string item;
+        while (std::getline(ss, item, ',')) {
+            size_t b = item.find_first_not_of(" \t");
+            if (b != std::string::npos) {
+                size_t e = item.find_last_not_of(" \t");
+                syms.push_back(LiveMarketDataClient::normalize_symbol(item.substr(b, e - b + 1)));
+            }
+        }
+    }
+    std::vector<std::string> defaults = {"SPY", "QQQ", "GLD", "BTC-USD"};
+    for (const auto& def : defaults) {
+        if (syms.size() >= 4) break;
+        if (std::find(syms.begin(), syms.end(), def) == syms.end()) syms.push_back(def);
+    }
+    syms.resize(4);
 
-    double port_vol = PortfolioLinearAlgebra::calculate_portfolio_volatility(corr, vols, weights);
+    std::vector<RealTimeAssetData> assets;
+    bool all_live = true;
+    for (const auto& s : syms) {
+        auto d = client.fetch_asset_smart(s, "6mo");
+        DataQualityDashboard::record_asset_quality(d);
+        if (!d.is_live) all_live = false;
+        assets.push_back(std::move(d));
+    }
+
+    auto yc = client.fetch_treasury_yields();
+    std::string anchor_ccy = assets[0].currency_code.empty() ? "USD" : assets[0].currency_code;
+    std::string anchor_disp = safe_ccy_display(assets[0]);
+    std::string rate_src;
+    double rf_rate = resolve_risk_free_rate(assets[0], yc, rate_src);
+
+    std::array<std::map<int64_t, double>, 4> price_maps;
+    Eigen::Vector4d spots;
+    for (size_t k = 0; k < 4; ++k) {
+        auto fx = build_fx_series(client, assets[k].currency_code, anchor_ccy, "6mo");
+        spots(static_cast<Eigen::Index>(k)) = (assets[k].current_price > 0.0)
+            ? assets[k].current_price * fx.spot_fx
+            : 100.0;
+        const auto& closes = assets[k].historical_prices;
+        for (size_t i = 0; i < closes.size(); ++i) {
+            if (closes[i] > 0.0) {
+                int64_t dk = bar_day_key(assets[k], i);
+                price_maps[k][dk] = closes[i] * fx.rate_on(dk);
+            }
+        }
+    }
+
+    std::vector<int64_t> common_dates;
+    for (const auto& [dk, _] : price_maps[0]) {
+        if (price_maps[1].contains(dk) && price_maps[2].contains(dk) && price_maps[3].contains(dk)) {
+            common_dates.push_back(dk);
+        }
+    }
 
     Eigen::MatrixXd cov_basket(4, 4);
-    cov_basket << 0.01263,  0.00025, -0.00017,  0.00503,
-                  0.00025,  0.00138,  0.00280,  0.00027,
-                 -0.00017,  0.00280,  0.03775,  0.00480,
-                  0.00503,  0.00027,  0.00480,  0.02900;
-    Eigen::Vector4d spots{100.0, 150.0, 25.0, 50.0};
-    auto paths = PortfolioLinearAlgebra::simulate_correlated_basket_paths(cov_basket, spots, 0.01, 1.0, 6, 100);
+    Eigen::Matrix3d corr3 = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d vols3{0.20, 0.25, 0.16};
+    bool used_empirical = false;
 
+    if (common_dates.size() >= 16) {
+        size_t m = common_dates.size() - 1;
+        Eigen::MatrixXd rets(m, 4);
+        for (size_t r = 0; r < m; ++r) {
+            for (size_t k = 0; k < 4; ++k) {
+                double p0 = price_maps[k][common_dates[r]];
+                double p1 = price_maps[k][common_dates[r + 1]];
+                rets(static_cast<Eigen::Index>(r), static_cast<Eigen::Index>(k)) = (p0 > 0.0 && p1 > 0.0) ? std::log(p1 / p0) : 0.0;
+            }
+        }
+        Eigen::RowVector4d mean_r = rets.colwise().mean();
+        Eigen::MatrixXd centered = rets.rowwise() - mean_r;
+        cov_basket = (centered.transpose() * centered) / static_cast<double>(m - 1) * 252.0;
+        for (int i = 0; i < 4; ++i) cov_basket(i, i) = std::max(cov_basket(i, i), 1e-6);
+
+        for (int i = 0; i < 3; ++i) vols3(i) = std::sqrt(cov_basket(i, i));
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                corr3(i, j) = cov_basket(i, j) / std::max(1e-9, vols3(i) * vols3(j));
+            }
+        }
+        used_empirical = true;
+    } else {
+        cov_basket << 0.0324, 0.0280, 0.0040, 0.0150,
+                      0.0280, 0.0529, 0.0050, 0.0220,
+                      0.0040, 0.0050, 0.0256, 0.0060,
+                      0.0150, 0.0220, 0.0060, 0.3025;
+        for (int i = 0; i < 3; ++i) vols3(i) = std::sqrt(cov_basket(i, i));
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) corr3(i, j) = cov_basket(i, j) / (vols3(i) * vols3(j));
+        }
+    }
+
+    Eigen::Vector3d weights{0.40, 0.30, 0.30};
+    double port_vol = PortfolioLinearAlgebra::calculate_portfolio_volatility(corr3, vols3, weights);
+    auto paths = PortfolioLinearAlgebra::simulate_correlated_basket_paths(cov_basket, spots, rf_rate, 1.0, 12, 100);
+
+    std::string mode_tag = (all_live && used_empirical) ? "[CANLI AMPİRİK KOVARYANS]" : "[KISMİ/VARSAYILAN MATRİS]";
     std::vector<std::string> lines = {
-        std::format("3 Varlıklı Portföy Volatilitesi: {}{:.2f}%{} (w=[0.6, -0.3, 0.7])", pal.glow_rgb, port_vol * 100.0, pal.reset_code),
-        "────────────────────────────────────────────────────────────────────────",
-        "Cholesky Ayrışımı (Σ = L * L^T) ile 4 Varlıklı Korelasyonlu Fiyat Simülasyonu:",
-        std::format("  • Varlık 1: ${:6.2f}  ──►  Yıl Sonu: ${:6.2f}", spots(0), paths(0, 6)),
-        std::format("  • Varlık 2: ${:6.2f}  ──►  Yıl Sonu: ${:6.2f}", spots(1), paths(1, 6)),
-        std::format("  • Varlık 3: ${:6.2f}  ──►  Yıl Sonu: ${:6.2f}", spots(2), paths(2, 6)),
-        std::format("  • Varlık 4: ${:6.2f}  ──►  Yıl Sonu: ${:6.2f}", spots(3), paths(3, 6))
+        std::format("Durum: {} │ Ortak İş Günü: {} │ Baz Kur: {} │ Faiz ({}): {:.2f}%",
+                    mode_tag, common_dates.size(), anchor_ccy, rate_src, rf_rate * 100.0),
+        std::format("3 Varlıklı Portföy Volatilitesi ({}/{}/{} w=[0.4,0.3,0.3]): {}{:.2f}%{}",
+                    assets[0].symbol, assets[1].symbol, assets[2].symbol,
+                    pal.glow_rgb, port_vol * 100.0, pal.reset_code),
+        std::format("Korelasyonlar: ρ({},{})={:.2f} │ ρ({},{})={:.2f} │ ρ({},{})={:.2f}",
+                    assets[0].symbol, assets[1].symbol, corr3(0, 1),
+                    assets[0].symbol, assets[2].symbol, corr3(0, 2),
+                    assets[1].symbol, assets[2].symbol, corr3(1, 2)),
+        "────────────────────────────────────────────────────────────────────────────",
+        "Cholesky Ayrışımı (Σ = L * L^T) ile 4 Varlıklı Korelasyonlu 1-Yıl Fiyat Simülasyonu:"
     };
-    te.print_box("EIGEN PORTFOY & SEPET ANALIZI", lines);
+    for (int k = 0; k < 4; ++k) {
+        double y_end = paths(k, 12);
+        double ret_pct = (spots(k) > 0.0) ? ((y_end - spots(k)) / spots(k) * 100.0) : 0.0;
+        lines.push_back(std::format("  • {:<10} (σ={:5.1f}%): {:>8.2f}{}  ──►  1-Yıl Senaryo: {:>8.2f}{} ({:+.1f}%)",
+                                    assets[k].symbol, std::sqrt(cov_basket(k, k)) * 100.0,
+                                    spots(k), anchor_disp, y_end, anchor_disp, ret_pct));
+    }
+    te.print_box("EIGEN CANLI PORTFÖY & CHOLESKY ANALİZİ", lines);
 }
 
-void run_macro_module() {
+void run_macro_module(LiveMarketDataClient& client) {
     auto& te = ThemeEngine::instance();
     const auto& pal = te.palette();
-    std::cout << "\n" << pal.glow_rgb << "--- [6] SABİT GETİRİ, TAHVİL VE FAİZ EĞRİSİ PCA ---" << pal.reset_code << "\n";
+    std::cout << "\n" << pal.glow_rgb << "--- [6] CANLI SABİT GETİRİ, TAHVİL VE FAİZ EĞRİSİ PCA ---" << pal.reset_code << "\n";
 
-    ChronoDate settle{2023, 10, 10};
+    auto live_yc = client.fetch_treasury_yields();
+    auto irx_hist = client.fetch_asset("^IRX", "1y");
+    auto fvx_hist = client.fetch_asset("^FVX", "1y");
+    auto tnx_hist = client.fetch_asset("^TNX", "1y");
+    DataQualityDashboard::record_asset_quality(irx_hist);
+    DataQualityDashboard::record_asset_quality(fvx_hist);
+    DataQualityDashboard::record_asset_quality(tnx_hist);
+
+    auto now_tp = std::chrono::system_clock::now();
+    std::time_t now_c = std::chrono::system_clock::to_time_t(now_tp);
+    std::tm now_tm = *std::localtime(&now_c);
+    ChronoDate settle{now_tm.tm_year + 1900, static_cast<unsigned>(now_tm.tm_mon + 1), static_cast<unsigned>(now_tm.tm_mday)};
+    settle.weekend_roll();
+
+    // Interpolate live continuous yields across the 12-point curve (0.25Y -> 30Y)
+    auto interp_live_rate = [&](double years) {
+        const double t0 = 0.25, t1 = 5.0, t2 = 10.0, t3 = 30.0;
+        double r0 = live_yc.three_month_yield;
+        double r1 = live_yc.five_year_yield;
+        double r2 = live_yc.ten_year_yield;
+        double r3 = live_yc.thirty_year_yield;
+        if (years <= t0) return r0;
+        if (years <= t1) return r0 + (r1 - r0) * (years - t0) / (t1 - t0);
+        if (years <= t2) return r1 + (r2 - r1) * (years - t1) / (t2 - t1);
+        if (years <= t3) return r2 + (r3 - r2) * (years - t2) / (t3 - t2);
+        return r3;
+    };
+
     std::vector<ChronoDate> maturities{
-        {2023, 10, 11}, {2024, 1, 10}, {2024, 4, 10}, {2024, 10, 10},
-        {2025, 10, 10}, {2026, 10, 12}, {2028, 10, 10}, {2030, 10, 10},
-        {2033, 10, 10}, {2038, 10, 11}, {2043, 10, 12}, {2053, 10, 10}
+        ChronoDate{settle}.add_days(1),
+        ChronoDate{settle}.add_months(3),
+        ChronoDate{settle}.add_months(6),
+        ChronoDate{settle}.add_years(1),
+        ChronoDate{settle}.add_years(2),
+        ChronoDate{settle}.add_years(3),
+        ChronoDate{settle}.add_years(5),
+        ChronoDate{settle}.add_years(7),
+        ChronoDate{settle}.add_years(10),
+        ChronoDate{settle}.add_years(15),
+        ChronoDate{settle}.add_years(20),
+        ChronoDate{settle}.add_years(30)
     };
-    std::vector<double> unit_prices{
-        0.999945, 0.994489, 0.988210, 0.973601,
-        0.939372, 0.901885, 0.827719, 0.759504,
-        0.670094, 0.547598, 0.448541, 0.300886
-    };
+    std::vector<double> unit_prices;
+    unit_prices.reserve(maturities.size());
+    for (const auto& mat : maturities) {
+        double yrs = std::max(1.0 / 365.0, static_cast<double>(mat - settle) / 365.0);
+        unit_prices.push_back(std::exp(-interp_live_rate(yrs) * yrs));
+    }
 
     LinearInterpYieldCurve yc{settle, maturities, unit_prices};
 
-    Bond bond{"20Y_CORP_BOND",
-              ChronoDate{2023, 5, 8},
-              ChronoDate{2023, 11, 7},
-              ChronoDate{2042, 11, 7},
-              ChronoDate{2043, 5, 7},
-              2, 0.062, 1000.0};
+    ChronoDate dated = ChronoDate{settle}.add_months(-5);
+    ChronoDate first_cpn = ChronoDate{dated}.add_months(6);
+    ChronoDate penult_cpn = ChronoDate{first_cpn}.add_years(19);
+    ChronoDate maturity = ChronoDate{penult_cpn}.add_months(6);
 
+    Bond bond{"20Y_BENCH_CORP", dated, first_cpn, penult_cpn, maturity, 2, 0.062, 1000.0};
     double bond_val = bond.discounted_value(settle, yc);
 
-    // Yield Curve PCA Decomposition
+    // Empirical Yield Curve PCA from 1Y live changes in 3M (^IRX), 5Y (^FVX), 10Y (^TNX)
+    auto to_date_map = [](const RealTimeAssetData& d) {
+        std::map<int64_t, double> mp;
+        const auto& cl = d.historical_prices;
+        for (size_t i = 0; i < cl.size(); ++i) {
+            if (cl[i] > 0.0) mp[bar_day_key(d, i)] = cl[i] / 100.0;
+        }
+        return mp;
+    };
+
+    auto m_irx = to_date_map(irx_hist);
+    auto m_fvx = to_date_map(fvx_hist);
+    auto m_tnx = to_date_map(tnx_hist);
+    std::vector<int64_t> yc_dates;
+    for (const auto& [dk, _] : m_irx) {
+        if (m_fvx.contains(dk) && m_tnx.contains(dk)) yc_dates.push_back(dk);
+    }
+
     Eigen::MatrixXd cov_yc(3, 3);
-    cov_yc << 0.01892, 0.00989, 0.00582,
-              0.00989, 0.01011, 0.00612,
-              0.00582, 0.00612, 0.00566;
+    bool empirical_pca = false;
+    if (yc_dates.size() >= 20 && irx_hist.is_live && fvx_hist.is_live && tnx_hist.is_live) {
+        size_t m = yc_dates.size() - 1;
+        Eigen::MatrixXd dy(m, 3);
+        for (size_t r = 0; r < m; ++r) {
+            dy(static_cast<Eigen::Index>(r), 0) = m_irx[yc_dates[r + 1]] - m_irx[yc_dates[r]];
+            dy(static_cast<Eigen::Index>(r), 1) = m_fvx[yc_dates[r + 1]] - m_fvx[yc_dates[r]];
+            dy(static_cast<Eigen::Index>(r), 2) = m_tnx[yc_dates[r + 1]] - m_tnx[yc_dates[r]];
+        }
+        Eigen::RowVector3d mean_dy = dy.colwise().mean();
+        Eigen::MatrixXd centered = dy.rowwise() - mean_dy;
+        cov_yc = (centered.transpose() * centered) / static_cast<double>(m - 1) * 252.0;
+        empirical_pca = true;
+    } else {
+        cov_yc << 0.01892, 0.00989, 0.00582,
+                  0.00989, 0.01011, 0.00612,
+                  0.00582, 0.00612, 0.00566;
+    }
+
     auto pca = PortfolioLinearAlgebra::analyze_yield_curve_pca(cov_yc);
 
     std::vector<std::string> lines = {
-        std::format("Valüasyon Tarihi (Settle Date):   {}", settle.to_string()),
-        std::format("20 Yıllık Tahvil İskontolu Fiyatı: {}${:.2f}{}", pal.glow_rgb, bond_val, pal.reset_code),
-        std::format("Kupon Yapısı: 6.20% Yıllık (Yarıyıl), Düzensiz Kısa İlk Dönem"),
-        "────────────────────────────────────────────────────────────────────────",
-        "Faiz Eğrisi PCA Dinamikleri (Temel Bileşen Analizi):",
+        std::format("Valüasyon Tarihi (Settle): {} │ Eğri Kaynağı: {}",
+                    settle.to_string(), live_yc.is_live ? "[CANLI ABD HAZİNE]" : "[VARSAYILAN]"),
+        std::format("Getiri Eğrisi: 3A={:.2f}% │ 5Y={:.2f}% │ 10Y={:.2f}% │ 30Y={:.2f}% (10Y-3M Spread: {:+.0f} bps)",
+                    live_yc.three_month_yield * 100.0, live_yc.five_year_yield * 100.0,
+                    live_yc.ten_year_yield * 100.0, live_yc.thirty_year_yield * 100.0,
+                    (live_yc.ten_year_yield - live_yc.three_month_yield) * 10000.0),
+        std::format("20 Yıllık 6.20% Kuponlu Tahvil (Nominal $1000) Bugünkü Değer: {}${:.2f}{}",
+                    pal.glow_rgb, bond_val, pal.reset_code),
+        "────────────────────────────────────────────────────────────────────────────",
+        std::format("Faiz Eğrisi PCA Dinamikleri ({}, {} Gün):",
+                    empirical_pca ? "CANLI ^IRX/^FVX/^TNX" : "VARSAYILAN KOVARYANS", yc_dates.size()),
         std::format("  • 1. Faktör (Seviye / Paralel Kayma): {}{:.1f}%{}", pal.glow_rgb, pca.level_shift_weight * 100.0, pal.reset_code),
         std::format("  • 2. Faktör (Eğim / Tilt Değişimi):   {:.1f}%", pca.slope_tilt_weight * 100.0),
         std::format("  • 3. Faktör (Eğrilik / Curvature):    {:.1f}%", pca.curvature_weight * 100.0)
     };
-    te.print_box("SABİT GETİRİLİ MENKUL KIYMET ANALİZİ", lines);
+    te.print_box("CANLI SABİT GETİRİLİ MENKUL KIYMET & PCA", lines);
 }
 
 void run_pairs_trading_module(LiveMarketDataClient& client) {
@@ -737,18 +1087,37 @@ void run_pairs_trading_module(LiveMarketDataClient& client) {
     a_sym = LiveMarketDataClient::normalize_symbol(a_sym);
     b_sym = LiveMarketDataClient::normalize_symbol(b_sym);
 
-    auto a_data = client.fetch_asset(a_sym, "6mo");
-    auto b_data = client.fetch_asset(b_sym, "6mo");
+    auto a_data = client.fetch_asset_smart(a_sym, "6mo");
+    auto b_data = client.fetch_asset_smart(b_sym, "6mo");
     auto a_fund = FundamentalEngine::fetch_fundamentals(client, a_data);
     auto b_fund = FundamentalEngine::fetch_fundamentals(client, b_data);
+    DataQualityDashboard::record_asset_quality(a_data, &a_fund);
+    DataQualityDashboard::record_asset_quality(b_data, &b_fund);
 
-    auto res = PairsTradingEngine::analyze_aligned(a_data, b_data);
-    std::string ccy = a_data.currency_display.empty()
-        ? LiveMarketDataClient::currency_display_for(LiveMarketDataClient::infer_currency_code(a_sym), a_sym)
-        : a_data.currency_display;
+    RealTimeAssetData b_norm = b_data;
+    std::string fx_note = "Aynı Para Birimi (" + (a_data.currency_code.empty() ? std::string("USD") : a_data.currency_code) + ")";
+    if (!a_data.currency_code.empty() && !b_data.currency_code.empty() && a_data.currency_code != b_data.currency_code) {
+        auto fx = build_fx_series(client, b_data.currency_code, a_data.currency_code, "6mo");
+        b_norm.current_price *= fx.spot_fx;
+        b_norm.previous_close *= fx.spot_fx;
+        for (size_t i = 0; i < b_norm.historical_prices.size(); ++i) {
+            int64_t dk = bar_day_key(b_norm, i);
+            double r = fx.rate_on(dk);
+            b_norm.historical_prices[i] *= r;
+        }
+        b_norm.currency_code = a_data.currency_code;
+        b_norm.currency_display = safe_ccy_display(a_data);
+        fx_note = std::format("{} -> {} Tarihsel Kur Düzeltmeli (Anlık Kur: {:.4f})",
+                              b_data.currency_code, a_data.currency_code, fx.spot_fx);
+    }
+
+    auto res = PairsTradingEngine::analyze_aligned(a_data, b_norm);
+    std::string ccy = safe_ccy_display(a_data);
+    std::string status_tag = (a_data.is_live && b_data.is_live) ? "[CANLI]" : "[ÇEVRİMDIŞI/KISMİ]";
 
     std::vector<std::string> lines = {
-        std::format("Parite:                  {}{}{}", pal.glow_rgb, res.pair_name, pal.reset_code),
+        std::format("Parite:                  {}{}{} {}", pal.glow_rgb, res.pair_name, pal.reset_code, status_tag),
+        std::format("Kur Normalizasyonu:      {}", fx_note),
         std::format("Eşleşen Ortak İş Günü:   {} gün  │  Korelasyon (ρ): {:.3f}", res.aligned_days, res.correlation),
         std::format("Hedge Oranı (Beta):      {:.4f}", res.hedge_ratio),
         std::format("Mevcut Spread Değeri:    {:.2f} {}", res.current_spread, ccy),
@@ -763,31 +1132,100 @@ void run_pairs_trading_module(LiveMarketDataClient& client) {
     te.print_box("STAT ARB PAIRS TRADING & FAVÖK KARŞILAŞTIRMASI", lines);
 }
 
-void run_drawdown_module() {
+void run_drawdown_module(LiveMarketDataClient& client) {
     auto& te = ThemeEngine::instance();
     const auto& pal = te.palette();
     std::cout << "\n" << pal.glow_rgb << "--- [8] MONTE CARLO DRAWDOWN & VAR RİSK MOTORU ---" << pal.reset_code << "\n";
+    std::cout << "Sembol girin (örn: SPY, NVDA, THYAO.IS, BTC-USD) [Default: SPY]: ";
+    std::string sym;
+    std::getline(std::cin, sym);
+    if (sym.empty()) sym = "SPY";
+    sym = LiveMarketDataClient::normalize_symbol(sym);
 
-    std::vector<double> pnl = {
-        -149299.30, -673165.13, 3891123.79, 1061346.21, -578464.00,
-        -260855.99, 1102167.76, 509764.96, -276786.46, -11947.13,
-        -277781.70, -318603.05, 57747.06, 151336.99, 267826.14,
-        -198132.05, -175232.84, -5973.61, 177224.51, -711878.76,
-        -276786.56, 116489.15, -185188.30, 1183810.47, 1563147.38
-    };
+    std::cout << "Sermaye / Portföy Büyüklüğü [Default: 100000]: ";
+    std::string cap_str;
+    std::getline(std::cin, cap_str);
+    double notional = 100000.0;
+    if (!cap_str.empty()) {
+        try {
+            double v = std::stod(cap_str);
+            if (v > 0.0) notional = v;
+        } catch (...) {}
+    }
+
+    auto data = client.fetch_asset_smart(sym, "1y");
+    DataQualityDashboard::record_asset_quality(data);
+    const auto& closes = data.historical_prices;
+    if (closes.size() < 10) {
+        std::cout << pal.red_rgb << "\n  ❌ Drawdown risk analizi için yeterli fiyat barı alınamadı!\n" << pal.reset_code;
+        return;
+    }
+
+    std::vector<double> pnl;
+    pnl.reserve(closes.size() - 1);
+    for (size_t i = 1; i < closes.size(); ++i) {
+        if (closes[i - 1] > 0.0 && closes[i] > 0.0) {
+            pnl.push_back(notional * (closes[i] - closes[i - 1]) / closes[i - 1]);
+        }
+    }
 
     auto risk = DrawdownRiskEngine::analyze(pnl, 1000, 42);
+    std::string ccy = safe_ccy_display(data);
+    std::string tag = data.is_live ? "[CANLI 1-YILLIK SERİ]" : "[ÇEVRİMDIŞI SİMÜLASYON]";
 
     std::vector<std::string> lines = {
-        std::format("Geçmiş Net Kâr/Zarar:       ${:.2f}", risk.net_profit),
-        std::format("Gerçekleşen Max Drawdown:   ${:.2f}", risk.original_max_drawdown),
+        std::format("Varlık: {} {} │ Sermaye: {:.0f} {} │ Gözlem: {} iş günü",
+                    data.symbol, tag, notional, ccy, pnl.size()),
+        std::format("Geçmiş Net Kâr/Zarar:       {:.2f} {}", risk.net_profit, ccy),
+        std::format("Gerçekleşen Max Drawdown:   {:.2f} {} ({:.2f}%)",
+                    risk.original_max_drawdown, ccy, (risk.original_max_drawdown / notional) * 100.0),
         std::format("Net Kâr / Max DD Oranı:     {:.2f}", risk.profit_to_max_dd_ratio),
-        std::format("1000 Simülasyon Ortalama DD: ${:.2f} (σ = ${:.2f})", risk.mean_simulated_dd, risk.sd_simulated_dd),
+        std::format("1000 Simülasyon Ortalama DD: {:.2f} {} (σ = {:.2f} {})",
+                    risk.mean_simulated_dd, ccy, risk.sd_simulated_dd, ccy),
         "────────────────────────────────────────────────────────────────────────",
-        std::format("Parametrik %95 Max DD (VaR):     {}{:.2f}{}", pal.glow_rgb, risk.parametric_95_dd, pal.reset_code),
-        std::format("Nonparametrik %95 Max DD (VaR):  {}{:.2f}{}", pal.glow_rgb, risk.nonparametric_95_dd, pal.reset_code)
+        std::format("Parametrik %95 Max DD (VaR):     {}{:.2f} {}{}", pal.glow_rgb, risk.parametric_95_dd, ccy, pal.reset_code),
+        std::format("Nonparametrik %95 Max DD (VaR):  {}{:.2f} {}{}", pal.glow_rgb, risk.nonparametric_95_dd, ccy, pal.reset_code)
     };
-    te.print_box("MONTE CARLO DRAWDOWN RISK ANALIZI", lines);
+    te.print_box("CANLI MONTE CARLO DRAWDOWN RISK ANALİZİ", lines);
+}
+
+void run_data_quality_dashboard(LiveMarketDataClient& client) {
+    auto& te = ThemeEngine::instance();
+    const auto& pal = te.palette();
+
+    // Trigger a live fetch to populate fresh metrics if needed
+    std::cout << "\n" << pal.dim_rgb
+              << I18n::tr("Canlı veri kaynakları taranıyor ve metrikler toplanıyor...",
+                          "Scanning live data sources and collecting metrics...",
+                          "Live-Datenquellen werden gescannt und Metriken gesammelt...")
+              << pal.reset_code << "\n";
+
+    // Fetch a few representative assets to populate quality metrics
+    std::vector<std::string> sample_symbols = {"SPY", "AAPL", "THYAO.IS", "GRAM-ALTIN", "BTC-USD"};
+    for (const auto& sym : sample_symbols) {
+        auto data = client.fetch_asset(sym, "1mo");
+        auto fund = FundamentalEngine::fetch_fundamentals(client, data);
+        DataQualityDashboard::record_asset_quality(data, &fund);
+        NewsSentimentEngine::get_asset_sentiment(data.symbol, data.long_name, client);
+    }
+
+    // Fetch Treasury Yields and all monitored FX pairs to populate endpoint & FX telemetry
+    client.fetch_treasury_yields();
+    client.get_fx_rate("USD", "TRY");
+    client.get_fx_rate("EUR", "TRY");
+    client.get_fx_rate("EUR", "USD");
+    client.get_fx_rate("TRY", "USD");
+    client.get_fx_rate("TRY", "EUR");
+
+    // Render the full dashboard
+    DataQualityDashboard::render_dashboard();
+
+    // Show inline quick-reference for recent symbols
+    std::cout << "\n" << pal.glow_rgb << "╟─── " << I18n::tr("HIZLI DURUM (SON SORGULANANLAR)", "QUICK STATUS (RECENTLY QUERIED)", "SCHNELLSTATUS (ZULETZT ANGEFRAGTE)") << " ───╢\n" << pal.reset_code;
+    for (const auto& sym : sample_symbols) {
+        std::string status = DataQualityDashboard::get_inline_status(sym);
+        std::cout << "  " << std::format("{:<14} : {}\n", sym, status);
+    }
 }
 
 void run_theme_selector() {
@@ -1121,17 +1559,19 @@ int main(int argc, char* argv[]) {
         } else if (choice == "2") {
             run_backtest_interactive(market_client);
         } else if (choice == "3") {
-            run_live_signals_interactive();
+            run_live_signals_interactive(market_client);
         } else if (choice == "4") {
             run_derivatives_module(market_client);
         } else if (choice == "5") {
-            run_portfolio_module();
+            run_portfolio_module(market_client);
         } else if (choice == "6") {
-            run_macro_module();
+            run_macro_module(market_client);
         } else if (choice == "7") {
             run_pairs_trading_module(market_client);
         } else if (choice == "8") {
-            run_drawdown_module();
+            run_drawdown_module(market_client);
+        } else if (choice == "D") {
+            run_data_quality_dashboard(market_client);
         } else if (choice == "T") {
             run_theme_selector();
         } else if (choice == "V") {
