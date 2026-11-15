@@ -29,7 +29,10 @@
 #include "quant/forecast_backtest.hpp"
 #include "quant/alpha_screener.hpp"
 #include "quant/data_quality.hpp"
+#include "quant/hft_lob_engine.hpp"
+#include "quant/cross_sectional_lab.hpp"
 #include "quant/i18n.hpp"
+#include <cstdlib>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -130,16 +133,16 @@ void print_menu() {
          I18n::tr("Yahoo Finance API: Hisse, Kripto, VWAP, Volatilite", "Yahoo Finance API: Equities, Crypto, VWAP, Volatility", "Yahoo Finance API: Aktien, Krypto, VWAP, Volatilität")},
         {"2",  "[BACK]",
          I18n::tr("Algoritmik Backtest", "Algorithmic Backtester", "Algorithmischer Backtester"),
-         I18n::tr("SMA Kesişimi, Bollinger Mean-Reversion, RSI Momentum", "SMA Crossover, Bollinger Mean-Reversion, RSI Momentum", "SMA-Kreuzung, Bollinger Mean-Reversion, RSI Momentum")},
+         I18n::tr("SMA, Bollinger, RSI, RL & OFI Stratejileri", "SMA, Bollinger, RSI, RL & OFI Strategies", "SMA, Bollinger, RSI, RL & OFI-Strategien")},
         {"3",  "[LIVE]",
          I18n::tr("Gerçek Zamanlı İzleyici", "Real-Time Streaming Signals", "Echtzeit-Signal-Streamer"),
          I18n::tr("Boost Accumulators akışkan sinyalleri (BBands & Crossover)", "Boost Accumulators rolling signals (BBands & Crossover)", "Boost Accumulators rollierende Signale")},
         {"4",  "[QUANT]",
          I18n::tr("Türev & Opsiyon Motoru", "Derivatives & Options Engine", "Derivate- & Options-Engine"),
-         I18n::tr("Black-Scholes, Greeks, Secant IV, std::async MC, Bariyerler", "Black-Scholes, Greeks, Secant IV, async MC, Barriers", "Black-Scholes, Greeks, Sekanten-IV, async MC, Barrieren")},
+         I18n::tr("Black-Scholes, Heston, Merton, IV & MC", "Black-Scholes, Heston, Merton, IV & MC", "Black-Scholes, Heston, Merton, IV & MC")},
         {"5",  "[PORT]",
          I18n::tr("Portföy Risk & Faktör Analizi", "Portfolio Risk & Factor Model", "Portfolio-Risiko & Faktormodell"),
-         I18n::tr("Eigen ω^T Σ ω, Cholesky Sepet Simülasyonu, QR Regresyon", "Eigen ω^T Σ ω, Cholesky Basket Simulation, QR Regr.", "Eigen ω^T Σ ω, Cholesky Korb-Simulation, QR-Regr.")},
+         I18n::tr("Eigen ω^TΣω, Cholesky, DPO (PSO/RL) & QR", "Eigen ω^TΣω, Cholesky, DPO (PSO/RL) & QR", "Eigen ω^TΣω, Cholesky, DPO (PSO/RL) & QR")},
         {"6",  "[MACRO]",
          I18n::tr("Sabit Getiri & Hazine Eğrisi", "Fixed Income & Yield Curve", "Festverzinsliche & Zinskurve"),
          I18n::tr("C++20 ChronoDate, Bootstrapping, Düzensiz Tahviller, PCA", "C++20 ChronoDate, Bootstrapping, Stub Bonds, PCA", "C++20 ChronoDate, Bootstrapping, Stub-Bonds, PCA")},
@@ -149,6 +152,9 @@ void print_menu() {
         {"8",  "[RISK]",
          I18n::tr("Drawdown & VaR Analizi", "Drawdown & VaR Risk Analytics", "Drawdown- & VaR-Risikoanalyse"),
          I18n::tr("Monte Carlo Shuffle, Parametrik & Nonparametrik Max DD", "Monte Carlo Shuffle, Parametric & Historical Max DD", "Monte-Carlo-Shuffle, Parametrischer & Hist. Max DD")},
+        {"9",  "[HFT/ML]",
+         I18n::tr("HFT Emir Defteri, IOR & Cache", "HFT LOB, IOR Router & Cache", "HFT-Orderbuch, IOR & Cache"),
+         I18n::tr("O(1) LOB, RMS, DRL IOR & Cache Bench", "O(1) LOB, RMS, DRL IOR & Cache Bench", "O(1)-LOB, RMS, DRL-IOR & Cache-Bench")},
         {"D",  "[QUALITY]",
          I18n::tr("Veri Kalite & Kaynak Sağlık Panosu", "Data Quality & Source Health Dashboard", "Datenqualitäts- & Quellen-Gesundheitspanel"),
          I18n::tr("API önbellek, FX kuru yaşı, veri bütünlüğü ve tamlık metrikleri", "API cache, FX rate age, data integrity & completeness metrics", "API-Cache, FX-Kursalter, Datenintegrität & Vollständigkeitsmetriken")},
@@ -161,6 +167,9 @@ void print_menu() {
         {"V",  "[TEST]",
          I18n::tr("Otomatik Doğrulama Testi", "Automated Verification Suite", "Automatische Testsuite"),
          I18n::tr("Tüm kitap formülleri ve ground-truth numerik doğrulaması", "Full textbook numerical & invariant verification", "Vollständige numerische Lehrbuch-Verifikation")},
+        {"W",  "[WEB-UI]",
+         I18n::tr("Görsel Araştırma Panosu (Web)", "Visual Research Dashboard (Web)", "Visuelles Forschungs-Dashboard"),
+         I18n::tr("React + FastAPI interaktif IC, ısı haritası & portföy UI", "React + FastAPI interactive IC, heatmap & portfolio UI", "React + FastAPI interaktive IC-, Heatmap- & Trade-UI")},
         {"11", "[INFO]",
          I18n::tr("Hakkında & Mimari", "About & Architecture", "Über das Terminal & Architektur"),
          I18n::tr("Kitap kaynakları, C++ standartları ve proje detayları", "Book sources, ISO C++ standards & project overview", "Buchquellen, ISO C++ Standards & Projektübersicht")},
@@ -225,12 +234,12 @@ void run_forecast_interactive(LiveMarketDataClient& client) {
     if (sym.empty()) sym = "THYAO.IS";
     sym = LiveMarketDataClient::normalize_symbol(sym);
 
-    std::cout << I18n::tr(std::format("Canlı 6-aylık OHLCV, haber akışı ve TTM FAVÖK/bilanço verileri çekiliyor ({})... ", sym),
-                          std::format("Fetching live 6-month OHLCV, news & TTM EBITDA/fundamentals ({})... ", sym),
-                          std::format("Live 6-Monats-OHLCV, News & TTM-EBITDA werden geladen ({})... ", sym))
+    std::cout << I18n::tr(std::format("Canlı 1-yıllık OHLCV, haber akışı ve TTM FAVÖK/bilanço verileri çekiliyor ({})... ", sym),
+                          std::format("Fetching live 1-year OHLCV, news & TTM EBITDA/fundamentals ({})... ", sym),
+                          std::format("Live 1-Jahres-OHLCV, News & TTM-EBITDA werden geladen ({})... ", sym))
               << std::flush;
 
-    auto data = client.fetch_asset_smart(sym, "6mo");
+    auto data = client.fetch_asset_smart(sym, "1y");
     sym = data.symbol;
 
     if (data.current_price <= 0.0) {
@@ -259,7 +268,7 @@ void run_forecast_interactive(LiveMarketDataClient& client) {
 
     auto multi = QuantForecastEngine::generate_multi_horizon(
         data, sent.sentiment_score, sent.sentiment_label, sent.has_live_news,
-        &fund, has_yc ? &yc : nullptr
+        &fund, has_yc ? &yc : nullptr, &sent
     );
     QuantForecastEngine::render_forecast_matrix(multi);
 
@@ -273,7 +282,7 @@ void run_forecast_interactive(LiveMarketDataClient& client) {
             int d = std::stoi(days_str);
             if (d > 0) {
                 auto custom_res = QuantForecastEngine::forecast_for_days(
-                    data, sent.sentiment_score, d, "", sent.has_live_news, &fund, has_yc ? &yc : nullptr
+                    data, sent.sentiment_score, d, "", sent.has_live_news, &fund, has_yc ? &yc : nullptr, &sent
                 );
                 std::string card_hdr = I18n::tr(
                     std::format("║  🎯 {} TAKVİM GÜNÜ ({} İŞ GÜNÜ) ÖZEL VADE TAHMİN KARTI", d, custom_res.trading_days),
@@ -426,6 +435,10 @@ void run_backtest_interactive(LiveMarketDataClient& client) {
         "  [2] Dual SMA Kesişimi (5 / 20 Gün)\n"
         "  [3] Bollinger Bantları Ortalamaya Dönüş (20 Gün, 2.0 Std)\n"
         "  [4] RSI Momentum (14 Gün, 30/70 Sınırları)\n"
+        "  [5] 🤖 RL Q-Learning & Experience Replay Ajanı (Silahian Ch.4 Walk-Forward)\n"
+        "  [6] ♟  Game-Theoretic Mikro-Yapı Emir Akışı Dengesizliği (Silahian Ch.3/7 OFI)\n"
+        "  [7] 🌐 Yatay Kesit Portföy, Sahte-Alfa & Tahmin Edilebilirlik Labı (BIST / US / XETRA + Web Raporu)\n"
+        "  [8] 🔍 Sızıntı & Ön-Doğrulama Teşhis Testi (Look-Ahead Seal, Overfit & Sentiment Variance)\n"
         "Seçiminiz [1]: ",
 
         "\nSelect Backtest Model / Strategy Type:\n"
@@ -433,6 +446,10 @@ void run_backtest_interactive(LiveMarketDataClient& client) {
         "  [2] Dual SMA Crossover (5 / 20 Days)\n"
         "  [3] Bollinger Bands Mean Reversion (20 Days, 2.0 Std)\n"
         "  [4] RSI Momentum (14 Days, 30/70 Bounds)\n"
+        "  [5] 🤖 RL Q-Learning & Experience Replay Agent (Silahian Ch.4 Walk-Forward)\n"
+        "  [6] ♟  Game-Theoretic Microstructure Order Flow Imbalance (Silahian Ch.3/7 OFI)\n"
+        "  [7] 🌐 Cross-Sectional Portfolio, Fake-Alpha & Predictability Lab (BIST / US / XETRA + Export)\n"
+        "  [8] 🔍 Leakage & Pre-Deployment Sanity Suite (Look-Ahead Seal, Overfit & Sentiment Var)\n"
         "Your Choice [1]: ",
 
         "\nBacktest-Modell / Strategietyp wählen:\n"
@@ -440,10 +457,65 @@ void run_backtest_interactive(LiveMarketDataClient& client) {
         "  [2] Dual-SMA-Kreuzung (5 / 20 Tage)\n"
         "  [3] Bollinger-Bänder Mean-Reversion (20 Tage, 2.0 Std)\n"
         "  [4] RSI Momentum (14 Tage, 30/70 Schwellen)\n"
+        "  [5] 🤖 RL Q-Learning & Experience Replay Agent (Silahian Kap.4 Walk-Forward)\n"
+        "  [6] ♟  Spieltheoretische Order-Flow-Imbalance (Silahian Kap.3/7 OFI)\n"
+        "  [7] 🌐 Querschnitts-Portfolio, Fake-Alpha & Prognostizierbarkeit (BIST / US / XETRA + Export)\n"
+        "  [8] 🔍 Look-Ahead Leakage & Pre-Deployment-Diagnose (Kausalität, Overfit, Sentiment-Var)\n"
         "Ihre Auswahl [1]: "
     );
     std::string s_choice;
     std::getline(std::cin, s_choice);
+
+    if (s_choice == "7") {
+        std::string default_reg = sym.ends_with(".IS") ? "BIST" : (sym.ends_with(".DE") ? "XETRA" : "US");
+        std::cout << I18n::tr(
+            std::format("\nEvren Seçin (BIST / US / XETRA) [Default: {}]: ", default_reg),
+            std::format("\nSelect Equity Universe (BIST / US / XETRA) [Default: {}]: ", default_reg),
+            std::format("\nAktienuniversum wählen (BIST / US / XETRA) [Default: {}]: ", default_reg)
+        );
+        std::string reg_in;
+        std::getline(std::cin, reg_in);
+        if (reg_in.empty()) reg_in = default_reg;
+        std::transform(reg_in.begin(), reg_in.end(), reg_in.begin(), ::toupper);
+
+        std::cout << I18n::tr("Tahmin Ufku (İş Günü: 1, 5, 21) [Default: 5]: ",
+                              "Forecast Horizon (Trading Days: 1, 5, 21) [Default: 5]: ",
+                              "Prognosehorizont (Handelstage: 1, 5, 21) [Default: 5]: ");
+        std::string h_in;
+        std::getline(std::cin, h_in);
+        int horizon = 5;
+        if (!h_in.empty()) { try { horizon = std::clamp(std::stoi(h_in), 1, 21); } catch (...) {} }
+
+        std::cout << pal.glow_rgb << I18n::tr(
+            std::format("\n🌐 {} evreni yükleniyor ve yatay kesit + sahte-alfa + tahmin edilebilirlik analizi çalışıyor...\n", reg_in),
+            std::format("\n🌐 Fetching {} universe and running cross-sectional + fake-alpha + predictability lab...\n", reg_in),
+            std::format("\n🌐 {} Universum wird geladen und Querschnitts-/Fake-Alpha-Analyse läuft...\n", reg_in))
+                  << pal.reset_code;
+        auto rep = CrossSectionalBacktestEngine::run_regional_study(client, reg_in, horizon, 4, "2y", true);
+        CrossSectionalBacktestEngine::render_report(rep);
+        return;
+    }
+
+    if (s_choice == "8") {
+        auto snap = client.fetch_asset_smart(sym, "1y");
+        auto diag = CrossSectionalBacktestEngine::run_diagnostic_sanity_checks(
+            snap.historical_prices.size() >= 80 ? &snap : nullptr);
+        std::vector<std::string> dlines = {
+            std::format("{:<28}: {} ({})", I18n::tr("Look-Ahead Nedensellik", "Look-Ahead Causality", "Look-Ahead-Kausalität"),
+                        diag.lookahead_audit.passed ? (pal.green_rgb + "PASS ✔" + pal.reset_code) : (pal.red_rgb + "FAIL ✘" + pal.reset_code),
+                        diag.lookahead_audit.detail),
+            std::format("{:<28}: {} (Yön: %{:.1f})", I18n::tr("Synthetic Overfit Sanity", "Synthetic Overfit Sanity", "Synthetischer Overfit-Test"),
+                        diag.synthetic_overfit_passed ? "PASS ✔" : "FAIL ✘", diag.synthetic_overfit_dir_acc * 100.0),
+            std::format("{:<28}: {} (σ={:.3f})", I18n::tr("Temporal Sentiment Var.", "Temporal Sentiment Var.", "Sentiment-Zeitvarianz"),
+                        diag.temporal_sentiment_var_passed ? "PASS ✔" : "FAIL ✘", diag.temporal_sentiment_std),
+            std::format("{:<28}: Pearson r={:+.4f} │ Spearman={:+.4f} │ t={:+.2f} │ p={:.4f}",
+                        I18n::tr("Sinyal Kalitesi (p-val)", "Signal Quality (p-val)", "Signalqualität (p-Wert)"),
+                        diag.signal_quality.pearson_r, diag.signal_quality.spearman_ic,
+                        diag.signal_quality.t_stat, diag.signal_quality.p_value)
+        };
+        te.print_box(I18n::tr("SIZINTI & ÖN-DOĞRULAMA TEŞHİSİ", "LEAKAGE & DIAGNOSTIC SUITE", "LEAKAGE- & DIAGNOSE-SUITE"), dlines);
+        return;
+    }
 
     if (s_choice == "1" || s_choice.empty()) {
         std::cout << I18n::tr(
@@ -506,8 +578,14 @@ void run_backtest_interactive(LiveMarketDataClient& client) {
     StrategyType st = StrategyType::SmaCrossover;
     if (s_choice == "3") st = StrategyType::BollingerMeanReversion;
     else if (s_choice == "4") st = StrategyType::RsiMomentum;
+    else if (s_choice == "5") st = StrategyType::RLDynamicPortfolio;
+    else if (s_choice == "6") st = StrategyType::OrderFlowImbalance;
 
-    auto res = BacktestEngine::run(data.historical_prices, st);
+    auto res = BacktestEngine::run_ohlcv(data.historical_prices,
+                                         data.historical_highs,
+                                         data.historical_lows,
+                                         data.historical_volumes,
+                                         st);
 
     std::vector<std::string> lines = {
         std::format("{:<26}: {}{}{}", I18n::tr("Uygulanan Strateji", "Strategy Applied", "Angewandte Strategie"), pal.glow_rgb, res.strategy_name, pal.reset_code),
@@ -676,6 +754,7 @@ void run_derivatives_module(LiveMarketDataClient& client) {
               << "  [2] Secant Yöntemi ile Zımni Oynaklık (Implied Volatility)\n"
               << "  [3] Çok Çekirdekli Monte Carlo (std::async) & Nakavt Bariyer Opsiyonları\n"
               << "  [4] Boost MultiArray Binomial Lattice (Avrupa vs Amerikan Erken Egzersiz)\n"
+              << "  [5] Silahian Ch.7 Gelişmiş Modeller: Heston, Merton Jump & Dupire Local Vol MC\n"
               << "Seçiminiz [1]: ";
     std::string sub_choice;
     std::getline(std::cin, sub_choice);
@@ -801,6 +880,66 @@ void run_derivatives_module(LiveMarketDataClient& client) {
                         barrier, ccy, p_barr, ccy, p_par - p_barr, ccy)
         };
         te.print_box("EŞZAMANLI MONTE CARLO & BARİYER DEĞERLEMESİ", lines);
+    } else if (sub_choice == "5") {
+        double strike = std::round(spot * 100.0) / 100.0;
+        double time_to_exp = 0.5;
+        BlackScholes bs_call{strike, spot, time_to_exp, PayoffType::Call, rate, div};
+        BlackScholes bs_put{strike, spot, time_to_exp, PayoffType::Put, rate, div};
+        double bs_c = bs_call(vol);
+        double bs_p = bs_put(vol);
+
+        OptionInfo opt_c_h{std::make_unique<CallPayoff>(strike), time_to_exp};
+        OptionInfo opt_p_h{std::make_unique<PutPayoff>(strike), time_to_exp};
+        MCOptionValuation mc_ch{std::move(opt_c_h), 64, vol, rate, div};
+        MCOptionValuation mc_ph{std::move(opt_p_h), 64, vol, rate, div};
+
+        MCOptionValuation::HestonParams hp;
+        hp.v0 = vol * vol;
+        hp.theta = vol * vol;
+        hp.kappa = 2.2;
+        hp.xi = std::clamp(vol * 1.4, 0.20, 0.55);
+        hp.rho = -0.68; // Leverage effect / negative equity-vol correlation
+
+        double heston_c = mc_ch.calc_heston_mc_price_par(spot, hp, 24000, 101);
+        double heston_p = mc_ph.calc_heston_mc_price_par(spot, hp, 24000, 101);
+
+        MCOptionValuation::MertonJumpParams jp;
+        jp.jump_intensity = 0.85;
+        jp.jump_mean = -0.05;
+        jp.jump_vol = 0.14;
+        double merton_c = mc_ch.calc_merton_jump_price_par(spot, jp, 24000, 202);
+        double merton_p = mc_ph.calc_merton_jump_price_par(spot, jp, 24000, 202);
+
+        MCOptionValuation::DupireSurfaceParams dp;
+        dp.base_vol = vol;
+        dp.skew_slope = -0.18;
+        dp.smile_convexity = 0.08;
+        dp.term_slope = 0.02;
+        double dupire_c = mc_ch.calc_dupire_local_vol_price_par(spot, dp, 24000, 303);
+        double dupire_p = mc_ph.calc_dupire_local_vol_price_par(spot, dp, 24000, 303);
+
+        std::vector<std::string> lines = {
+            std::format("Dayanak: {} {} │ Spot={:.2f} {} │ Strike K={:.2f} {} │ T=0.5y │ σ={:.2f}%",
+                        live.symbol, live_tag, spot, ccy, strike, ccy, vol * 100.0),
+            std::format("Heston Parametreleri: κ={:.1f}, θ=v0={:.4f}, ξ={:.2f}, ρ={:.2f} (Cholesky Euler-MC)",
+                        hp.kappa, hp.theta, hp.xi, hp.rho),
+            std::format("Merton Jump Param.:   λ={:.2f}/yıl, μ_J={:+.2f}, σ_J={:.2f} (Poisson-LogNormal)",
+                        jp.jump_intensity, jp.jump_mean, jp.jump_vol),
+            std::format("Dupire Local Vol:     σ0={:.2f}%, skew={:+.2f}, smile={:.2f}, term={:.2f}",
+                        dp.base_vol * 100.0, dp.skew_slope, dp.smile_convexity, dp.term_slope),
+            "────────────────────────────────────────────────────────────────────────────",
+            std::format("Black-Scholes (Referans):  Call = {:.4f} {}  │  Put = {:.4f} {}", bs_c, ccy, bs_p, ccy),
+            std::format("Heston Stokastik Volatilite: Call = {}{:.4f}{} ({:+.2f}) │ Put = {}{:.4f}{} ({:+.2f})",
+                        pal.glow_rgb, heston_c, pal.reset_code, heston_c - bs_c,
+                        pal.glow_rgb, heston_p, pal.reset_code, heston_p - bs_p),
+            std::format("Merton Jump-Diffusion Model: Call = {}{:.4f}{} ({:+.2f}) │ Put = {}{:.4f}{} ({:+.2f})",
+                        pal.glow_rgb, merton_c, pal.reset_code, merton_c - bs_c,
+                        pal.glow_rgb, merton_p, pal.reset_code, merton_p - bs_p),
+            std::format("Dupire Yerel Vol Yüzeyi:     Call = {}{:.4f}{} ({:+.2f}) │ Put = {}{:.4f}{} ({:+.2f})",
+                        pal.glow_rgb, dupire_c, pal.reset_code, dupire_c - bs_c,
+                        pal.glow_rgb, dupire_p, pal.reset_code, dupire_p - bs_p)
+        };
+        te.print_box("SİLAHİAN CH.7: HESTON, MERTON JUMP & DUPİRE LOCAL VOL", lines);
     } else {
         double strike = std::round(spot * 1.10 * 100.0) / 100.0;
         OptionInfo put_opt{std::make_unique<PutPayoff>(strike), 1.0};
@@ -885,6 +1024,7 @@ void run_portfolio_module(LiveMarketDataClient& client) {
     }
 
     Eigen::MatrixXd cov_basket(4, 4);
+    Eigen::MatrixXd emp_rets;
     Eigen::Matrix3d corr3 = Eigen::Matrix3d::Identity();
     Eigen::Vector3d vols3{0.20, 0.25, 0.16};
     bool used_empirical = false;
@@ -903,6 +1043,7 @@ void run_portfolio_module(LiveMarketDataClient& client) {
         Eigen::MatrixXd centered = rets.rowwise() - mean_r;
         cov_basket = (centered.transpose() * centered) / static_cast<double>(m - 1) * 252.0;
         for (int i = 0; i < 4; ++i) cov_basket(i, i) = std::max(cov_basket(i, i), 1e-6);
+        emp_rets = std::move(rets);
 
         for (int i = 0; i < 3; ++i) vols3(i) = std::sqrt(cov_basket(i, i));
         for (int i = 0; i < 3; ++i) {
@@ -919,6 +1060,13 @@ void run_portfolio_module(LiveMarketDataClient& client) {
         for (int i = 0; i < 3; ++i) vols3(i) = std::sqrt(cov_basket(i, i));
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j) corr3(i, j) = cov_basket(i, j) / (vols3(i) * vols3(j));
+        }
+        auto syn_paths = PortfolioLinearAlgebra::simulate_correlated_basket_paths(cov_basket, spots, rf_rate, 0.25, 63, 77);
+        emp_rets.resize(63, 4);
+        for (long r = 0; r < 63; ++r) {
+            for (long k = 0; k < 4; ++k) {
+                emp_rets(r, k) = (syn_paths(k, r) > 0.0) ? std::log(syn_paths(k, r + 1) / syn_paths(k, r)) : 0.0;
+            }
         }
     }
 
@@ -946,6 +1094,27 @@ void run_portfolio_module(LiveMarketDataClient& client) {
         lines.push_back(std::format("  • {:<10} (σ={:5.1f}%): {:>8.2f}{}  ──►  1-Yıl Senaryo: {:>8.2f}{} ({:+.1f}%)",
                                     assets[k].symbol, std::sqrt(cov_basket(k, k)) * 100.0,
                                     spots(k), anchor_disp, y_end, anchor_disp, ret_pct));
+    }
+    if (emp_rets.rows() >= 16) {
+        auto dpo = PortfolioLinearAlgebra::optimize_dynamic_portfolio(emp_rets, rf_rate);
+        static const char* act_names[] = {"Equal-Weight", "Defensive-MinVar", "Momentum-Tilt", "Balanced-Core"};
+        lines.push_back("────────────────────────────────────────────────────────────────────────────");
+        lines.push_back(std::format("Silahian Ch.4 DPO (PSO & Nedensel RL Q-Learning Rejim: {}):",
+                                    act_names[std::clamp(dpo.selected_regime_action, 0, 3)]));
+        lines.push_back(std::format("  • PSO Sharpe-Max ({:.2f}):   {}={:.0f}% │ {}={:.0f}% │ {}={:.0f}% │ {}={:.0f}% (R={:+.1f}%, σ={:.1f}%)",
+                                    dpo.pso_sharpe,
+                                    assets[0].symbol, dpo.pso_weights(0) * 100.0,
+                                    assets[1].symbol, dpo.pso_weights(1) * 100.0,
+                                    assets[2].symbol, dpo.pso_weights(2) * 100.0,
+                                    assets[3].symbol, dpo.pso_weights(3) * 100.0,
+                                    dpo.pso_return_ann * 100.0, dpo.pso_vol_ann * 100.0));
+        lines.push_back(std::format("  • RL Out-of-Sample ({:.2f}): {}={:.0f}% │ {}={:.0f}% │ {}={:.0f}% │ {}={:.0f}% (R={:+.1f}%, σ={:.1f}%)",
+                                    dpo.rl_sharpe,
+                                    assets[0].symbol, dpo.rl_weights(0) * 100.0,
+                                    assets[1].symbol, dpo.rl_weights(1) * 100.0,
+                                    assets[2].symbol, dpo.rl_weights(2) * 100.0,
+                                    assets[3].symbol, dpo.rl_weights(3) * 100.0,
+                                    dpo.rl_return_ann * 100.0, dpo.rl_vol_ann * 100.0));
     }
     te.print_box("EIGEN CANLI PORTFÖY & CHOLESKY ANALİZİ", lines);
 }
@@ -1124,6 +1293,7 @@ void run_pairs_trading_module(LiveMarketDataClient& client) {
         std::format("Spread Ortalaması (μ):   {:.2f} {} (σ = {:.2f} {})", res.spread_mean, ccy, res.spread_std, ccy),
         std::format("Güncel Spread Z-Score:   {}{:+.2f}{}", pal.glow_rgb, res.current_zscore, pal.reset_code),
         std::format("OU Ortalamaya Dönüş Yarılanma Ömrü (Half-Life): {:.1f} gün", res.half_life_days),
+        std::format("IOR Net Edge (20bps Maliyet Düşülmüş Z): {:+.2f}  │  {}", res.net_edge_zscore, res.execution_urgency),
         std::format("Algoritmik Sinyal:       {}{}{}", pal.glow_rgb, res.signal, pal.reset_code),
         "────────────────────────────────────────────────────────────────────────",
         std::format("{} Temel/FAVÖK: {}", a_data.symbol, a_fund.summary_line),
@@ -1162,14 +1332,19 @@ void run_drawdown_module(LiveMarketDataClient& client) {
     }
 
     std::vector<double> pnl;
+    std::vector<double> rets;
     pnl.reserve(closes.size() - 1);
+    rets.reserve(closes.size() - 1);
     for (size_t i = 1; i < closes.size(); ++i) {
         if (closes[i - 1] > 0.0 && closes[i] > 0.0) {
-            pnl.push_back(notional * (closes[i] - closes[i - 1]) / closes[i - 1]);
+            double r = (closes[i] - closes[i - 1]) / closes[i - 1];
+            rets.push_back(r);
+            pnl.push_back(notional * r);
         }
     }
 
     auto risk = DrawdownRiskEngine::analyze(pnl, 1000, 42);
+    auto stress = DrawdownRiskEngine::run_stress_scenarios(rets, notional, 12.0);
     std::string ccy = safe_ccy_display(data);
     std::string tag = data.is_live ? "[CANLI 1-YILLIK SERİ]" : "[ÇEVRİMDIŞI SİMÜLASYON]";
 
@@ -1184,9 +1359,132 @@ void run_drawdown_module(LiveMarketDataClient& client) {
                     risk.mean_simulated_dd, ccy, risk.sd_simulated_dd, ccy),
         "────────────────────────────────────────────────────────────────────────",
         std::format("Parametrik %95 Max DD (VaR):     {}{:.2f} {}{}", pal.glow_rgb, risk.parametric_95_dd, ccy, pal.reset_code),
-        std::format("Nonparametrik %95 Max DD (VaR):  {}{:.2f} {}{}", pal.glow_rgb, risk.nonparametric_95_dd, ccy, pal.reset_code)
+        std::format("Nonparametrik %95 Max DD (VaR):  {}{:.2f} {}{}", pal.glow_rgb, risk.nonparametric_95_dd, ccy, pal.reset_code),
+        "────────────────────────────────────────────────────────────────────────",
+        std::format("Silahian Ch.4 Tarihsel %95/%99 VaR (1G): {:.2f} / {:.2f} {} (CVaR95: {:.2f})",
+                    stress.hist_var_95, stress.hist_var_99, ccy, stress.cvar_95),
+        std::format("Stres Testi (-%15 Çöküş): -{:.2f} {} │ Likidite Dondurma (2x Vol+Slippage): -{:.2f} {}",
+                    stress.market_crash_15pct_loss, ccy, stress.vol_2x_liquidity_freeze_loss, ccy)
     };
-    te.print_box("CANLI MONTE CARLO DRAWDOWN RISK ANALİZİ", lines);
+    te.print_box("CANLI MONTE CARLO DRAWDOWN & SİLAHİAN STRES RİSK ANALİZİ", lines);
+}
+
+void run_hft_lowlatency_module(LiveMarketDataClient& client) {
+    auto& te = ThemeEngine::instance();
+    const auto& pal = te.palette();
+    std::cout << "\n" << pal.glow_rgb
+              << I18n::tr("--- [9] HFT EMİR DEFTERİ, IOR ROUTER & DÜŞÜK GECİKME MOTORU (SİLAHİAN 2024) ---",
+                          "--- [9] HFT ORDER BOOK, IOR ROUTER & LOW-LATENCY ENGINE (SILAHIAN 2024) ---",
+                          "--- [9] HFT-ORDERBUCH, IOR ROUTER & LOW-LATENCY-ENGINE (SILAHIAN 2024) ---")
+              << pal.reset_code << "\n";
+    std::cout << I18n::tr("Dayanak varlık sembolü girin (örn: SPY, AAPL, THYAO.IS, BTC-USD) [Default: SPY]: ",
+                          "Enter ticker symbol (e.g. SPY, AAPL, THYAO.IS, BTC-USD) [Default: SPY]: ",
+                          "Tickersymbol eingeben (z.B. SPY, AAPL, THYAO.IS, BTC-USD) [Default: SPY]: ");
+    std::string sym;
+    std::getline(std::cin, sym);
+    if (sym.empty()) sym = "SPY";
+    sym = LiveMarketDataClient::normalize_symbol(sym);
+
+    auto live = client.fetch_asset_smart(sym, "6mo");
+    DataQualityDashboard::record_asset_quality(live);
+    const double spot = (live.current_price > 0.0) ? live.current_price : 100.0;
+    const double vol = (live.annualized_volatility > 0.01) ? live.annualized_volatility : 0.22;
+    const std::string ccy = safe_ccy_display(live);
+    const std::string live_tag = live.is_live ? "[CANLI]" : "[SİMÜLASYON]";
+
+    // 1. Lock-Free SPSC Ring Buffer -> Pre-Allocated O(1) Circular-Array LOB -> Game-Theoretic MM & Pre-Trade RMS
+    const double tick = std::max(0.01, std::round((spot * 0.0005) * 100.0) / 100.0);
+    CircularArrayLOB lob(std::max(0.01, spot * 0.70), spot * 1.30, tick, 4096);
+    SpscRingBuffer<MarketTickMessage, 256> feed_hub;
+
+    std::mt19937_64 rng(2024ULL);
+    std::uniform_int_distribution<int64_t> qty_dist(150, 950);
+    uint64_t oid = 1;
+    for (int lvl = 1; lvl <= 6; ++lvl) {
+        for (int rep = 0; rep < 3; ++rep) {
+            feed_hub.try_push(MarketTickMessage{oid, oid, qty_dist(rng), spot - lvl * tick, OrderSide::Buy, 0, lvl});
+            ++oid;
+            feed_hub.try_push(MarketTickMessage{oid, oid, qty_dist(rng), spot + lvl * tick, OrderSide::Sell, 0, lvl});
+            ++oid;
+        }
+    }
+    MarketTickMessage msg;
+    while (feed_hub.try_pop(msg)) {
+        lob.add_order(msg.order_id, msg.side, msg.price, msg.qty);
+    }
+
+    const auto lob_m = lob.analytics();
+    const auto mm_quote = GameTheoreticQuoter::run_market_making_session(lob_m.mid_price, vol, 200, 101);
+    const auto nash_now = GameTheoreticQuoter::compute_nash_quotes(lob_m.mid_price, lob_m.micro_price, lob_m.top5_imbalance, 3, vol);
+
+    PreTradeRiskConfig rms_cfg;
+    rms_cfg.max_order_qty = 10000;
+    rms_cfg.max_order_notional = std::max(250000.0, spot * 5000.0);
+    rms_cfg.max_price_collar_pct = 5.0;
+    PreTradeRiskEngine rms(rms_cfg);
+    auto chk_valid = rms.validate_order(OrderSide::Buy, lob_m.best_bid, 500, lob_m.mid_price);
+    auto chk_fat   = rms.validate_order(OrderSide::Buy, spot * 1.18, 500, lob_m.mid_price);
+    rms.set_pnl(-30000.0);
+    auto chk_kill  = rms.validate_order(OrderSide::Sell, lob_m.best_ask, 100, lob_m.mid_price);
+
+    std::vector<std::string> lob_lines = {
+        std::format("Varlık: {} {} │ Spot={:.2f} {} │ Tick={:.2f} │ L1/SPSC Lock-Free Hub + O(1) Circular LOB",
+                    live.symbol, live_tag, spot, ccy, tick),
+        std::format("Best Bid/Offer:  {:.2f}{} (x{})  │  {:.2f}{} (x{})  │  Spread={:.1f} bps",
+                    lob_m.best_bid, ccy, lob_m.best_bid_qty, lob_m.best_ask, ccy, lob_m.best_ask_qty, lob_m.spread_bps),
+        std::format("Microprice:      {:.4f}{} (Mid: {:.4f}) │ L1 OBI: {:+.3f} │ Top-5 OBI: {:+.3f}",
+                    lob_m.micro_price, ccy, lob_m.mid_price, lob_m.l1_imbalance, lob_m.top5_imbalance),
+        "────────────────────────────────────────────────────────────────────────────",
+        std::format("Ch.7 Nash Market-Making (Inv=+3): Rez={:.4f}{} │ Bid={:.4f} │ Ask={:.4f} (±{:.1f} bps)",
+                    nash_now.reservation_price, ccy, nash_now.optimal_bid, nash_now.optimal_ask, nash_now.optimal_half_spread_bps),
+        std::format("200-Adım MM Simülasyonu: Fills={} │ Final Inv={} │ Net PnL={}{:+.2f} {}{}",
+                    mm_quote.simulated_fills, mm_quote.final_inventory, pal.glow_rgb, mm_quote.simulated_mm_pnl, ccy, pal.reset_code),
+        "────────────────────────────────────────────────────────────────────────────",
+        std::format("Ch.3 Pre-Trade RMS: [Normal 500sh: {}] │ [+18% Fat-Finger: {}] │ [-30k DD: {}]",
+                    chk_valid.approved ? "APPROVED" : "REJECTED",
+                    chk_fat.message,
+                    chk_kill.approved ? "APPROVED" : "KILL-SWITCH HALTED")
+    };
+    te.print_box("SİLAHİAN CH.2/3/7: LOCK-FREE RING BUFFER, O(1) LOB, RMS & NASH MM", lob_lines);
+
+    // 2. Intelligent Order Router (IOR - Chapter 4 Q-Learning Execution Optimization)
+    IntelligentOrderRouter ior;
+    const double spread_in = std::max(4.0, lob_m.spread_bps);
+    const auto ior_sum = ior.simulate_parent_order(spot, vol, spread_in, 10000, 260, 42);
+    std::vector<std::string> ior_lines = {
+        std::format("Ana Emir: 10,000 Adet {} │ Arrival Fiyatı: {:.4f} {} │ Spread={:.1f} bps, σ={:.1f}%",
+                    live.symbol, ior_sum.arrival_price, ccy, spread_in, vol * 100.0),
+        std::format("Naive LIT Sweep:     VWAP={:.4f}{} │ Dolum={} sh │ Shortfall={:.2f} bps",
+                    ior_sum.naive_vwap, ccy, ior_sum.naive_filled_shares, ior_sum.naive_shortfall_bps),
+        std::format("RL IOR Smart Router: VWAP={:.4f}{} │ Dolum={} sh ({:.1f}%) │ Shortfall={}{:.2f} bps{}",
+                    ior_sum.ior_vwap, ccy, ior_sum.ior_filled_shares, ior_sum.ior_fill_rate_pct,
+                    pal.green_rgb, ior_sum.ior_shortfall_bps, pal.reset_code),
+        std::format("Execution Tasarrufu: {}{:+.2f} bps{} │ Ort. Gecikme: {:.1f} µs │ Baskın Venue: {}",
+                    pal.glow_rgb, ior_sum.shortfall_savings_bps, pal.reset_code,
+                    ior_sum.avg_latency_us, ior_sum.dominant_venue),
+        std::format("Venue Dağılımı: LIT_PRIMARY={} slice │ MIDPOINT_DARK={} slice │ ALT_ECN_FAST={} slice",
+                    ior_sum.venue_allocations[0], ior_sum.venue_allocations[1], ior_sum.venue_allocations[2])
+    };
+    te.print_box("SİLAHİAN CH.4: INTELLIGENT ORDER ROUTER (DRL EXECUTION OPTIMIZER)", ior_lines);
+
+    // 3. Chapter 6 + Chapter 3 Empirical On-Machine Low-Latency Benchmark
+    const auto bench = LowLatencyBenchmarkSuite::run_on_machine(25000, 224);
+    std::vector<std::string> perf_lines = {
+        I18n::tr("Gerçek Makine Ölçümleri (std::chrono::steady_clock, bu CPU üzerinde canlı test):",
+                 "Actual On-Machine Measurements (std::chrono::steady_clock on this CPU):",
+                 "Echte CPU-Messungen (std::chrono::steady_clock auf dieser Hardware):"),
+        std::format("  1. Ch.3 Emir Defteri (25k Ops):   std::map={:6.2f} ms  │ O(1) Circular={:6.2f} ms  ──► {}{:.2f}x HIZLI{}",
+                    bench.lob_map_ms, bench.lob_circular_ms, pal.glow_rgb, bench.lob_speedup, pal.reset_code),
+        std::format("  2. Ch.6 False-Sharing (2x1.2M):   Unpadded={:6.2f} ms  │ alignas(64)=  {:6.2f} ms  ──► {}{:.2f}x HIZLI{}",
+                    bench.false_shared_ms, bench.cache_padded_ms, pal.glow_rgb, bench.false_sharing_speedup, pal.reset_code),
+        std::format("  3. Ch.6 Data Locality & Unroll:   Col-Maj= {:6.2f} ms  │ Row-Tiled 4x= {:6.2f} ms  ──► {}{:.2f}x HIZLI{}",
+                    bench.col_major_ms, bench.row_major_tiled_ms, pal.glow_rgb, bench.locality_speedup, pal.reset_code),
+        std::format("  4. Ch.6 System Warmup (Hotpath):  Cold=    {:6.4f} ms  │ Primed=       {:6.4f} ms",
+                    bench.cold_pass_ms, bench.warmed_pass_ms),
+        std::format("  5. Ch.6 Branch Elimination (2.4M):Branchy= {:6.2f} ms  │ Branchless=   {:6.2f} ms  ──► {:.2f}x",
+                    bench.branchy_unsorted_ms, bench.branchless_ms, bench.branchless_speedup)
+    };
+    te.print_box("SİLAHİAN CH.6: CPU CACHE LINE, FALSE SHARING & LOKALİTE BENCHMARK", perf_lines);
 }
 
 void run_data_quality_dashboard(LiveMarketDataClient& client) {
@@ -1463,6 +1761,56 @@ void run_investment_advisor_interactive(LiveMarketDataClient& client) {
     QuantInvestmentAdvisor::render_plan_cards(plan);
 }
 
+void run_web_dashboard_launcher(LiveMarketDataClient& client) {
+    auto& te = ThemeEngine::instance();
+    const auto& pal = te.palette();
+    namespace fs = std::filesystem;
+
+    std::cout << "\n" << pal.glow_rgb
+              << I18n::tr("--- [W] MODERNQUANT GÖRSEL ARAŞTIRMA PANOSU (REACT + FASTAPI) ---",
+                          "--- [W] MODERNQUANT VISUAL RESEARCH DASHBOARD (REACT + FASTAPI) ---",
+                          "--- [W] MODERNQUANT VISUELLES FORSCHUNGS-DASHBOARD (REACT + FASTAPI) ---")
+              << pal.reset_code << "\n";
+
+    bool has_reports = false;
+    if (fs::exists("reports")) {
+        for (const auto& entry : fs::directory_iterator("reports")) {
+            if (entry.is_directory() && fs::exists(entry.path() / "summary.csv")) {
+                has_reports = true;
+                break;
+            }
+        }
+    }
+
+    if (!has_reports) {
+        std::cout << pal.dim_rgb << I18n::tr(
+            "reports/ klasöründe henüz dışa aktarılmış deney yok. Dashboard için hızlı bir US Yatay Kesit raporu üretilsin mi? [E/h]: ",
+            "No exported experiments in reports/ yet. Generate a live US cross-sectional report for the dashboard? [Y/n]: ",
+            "Noch keine Berichte in reports/. Jetzt einen US-Querschnittsbericht generieren? [J/n]: ")
+                  << pal.reset_code;
+        std::string ans;
+        std::getline(std::cin, ans);
+        if (ans.empty() || ans[0] == 'e' || ans[0] == 'E' || ans[0] == 'y' || ans[0] == 'Y' || ans[0] == 'j' || ans[0] == 'J') {
+            auto rep = CrossSectionalBacktestEngine::run_regional_study(client, "US", 5, 4, "2y", true);
+            CrossSectionalBacktestEngine::render_report(rep);
+        }
+    }
+
+    if (!fs::exists("dashboard/start.py")) {
+        std::cout << pal.red_rgb << "\n  ❌ dashboard/start.py bulunamadı!\n" << pal.reset_code;
+        return;
+    }
+
+    std::cout << pal.green_rgb << "\n  🚀 FastAPI (http://localhost:8000) & React Vite UI (http://localhost:5173) başlatılıyor...\n"
+              << "     Çıkmak için yeni açılan pencerede Ctrl+C kullanabilirsiniz.\n" << pal.reset_code;
+#ifdef _WIN32
+    int rc = std::system("start \"ModernQuant Research Dashboard\" cmd /k \"python dashboard\\start.py\"");
+#else
+    int rc = std::system("python3 dashboard/start.py &");
+#endif
+    (void)rc;
+}
+
 void print_about_info() {
     auto& te = ThemeEngine::instance();
     std::vector<std::string> lines = {
@@ -1474,8 +1822,12 @@ void print_about_info() {
         "     • C++20 ChronoDate, Ranges, Task Concurrency (std::async)",
         "     • Eigen Matrix Linear Algebra, Cholesky, Householder QR, PCA",
         "     • Boost MultiArray Binomial Trees & Boost Accumulators",
-        "  2. Python for Algorithmic Trading Cookbook (Jason Strimpel, 2024)",
-        "  3. Python for Algorithmic Trading (Yves Hilpisch, O'Reilly 2021)",
+        "  2. C++ High Performance for Financial Systems (Ariel Silahian, Packt 2024)",
+        "     • O(1) Circular-Array LOB, Lock-Free SPSC Hub, Pre-Trade RMS & Nash MM",
+        "     • Dynamic Portfolio Opt (PSO / RL), IOR Router, Stress Test & Net Pairs",
+        "     • Cache Alignment (64B), Circuit Breaker / P95 SLO, Heston/Merton/Dupire",
+        "  3. Python for Algorithmic Trading Cookbook (Jason Strimpel, 2024)",
+        "  4. Python for Algorithmic Trading (Yves Hilpisch, O'Reilly 2021)",
         "────────────────────────────────────────────────────────────────────────",
         I18n::tr("Mimari: 100% ISO C++20, RAII, Smart Pointers, Concept Safety, 0 Memory Leak",
                  "Architecture: 100% ISO C++20, RAII, Smart Pointers, Concepts, Zero Leaks",
@@ -1508,6 +1860,30 @@ int main(int argc, char* argv[]) {
         if (arg == "--test") {
             bool pass = AutomatedTestSuite::run_all_tests();
             return pass ? 0 : 1;
+        } else if (arg == "--export-report" && i + 1 < argc) {
+            std::string reg = argv[++i];
+            std::transform(reg.begin(), reg.end(), reg.begin(), ::toupper);
+            LiveMarketDataClient cli;
+            if (reg == "SYN") {
+                std::vector<RealTimeAssetData> syn_univ;
+                for (int k = 0; k < 8; ++k) {
+                    syn_univ.push_back(CrossSectionalBacktestEngine::make_synthetic_asset_(
+                        std::format("SYN{}.MQ", k + 1), 160, 4200ULL + static_cast<uint64_t>(k) * 97ULL,
+                        0.0004, 0.014 + 0.002 * k));
+                }
+                CrossSectionalConfig cfg;
+                cfg.region = "SYN";
+                cfg.experiment_name = "bt_cpp_SYN_h5_demo";
+                cfg.horizon_days = 5;
+                cfg.top_n = 3;
+                auto rep = CrossSectionalBacktestEngine::run_backtest(syn_univ, cfg);
+                CrossSectionalBacktestEngine::export_report(rep, &syn_univ);
+                CrossSectionalBacktestEngine::render_report(rep);
+                return rep.valid ? 0 : 1;
+            }
+            auto rep = CrossSectionalBacktestEngine::run_regional_study(cli, reg, 5, 4, "2y", true);
+            CrossSectionalBacktestEngine::render_report(rep);
+            return rep.valid ? 0 : 1;
         } else if ((arg == "--lang" || arg == "--language") && i + 1 < argc) {
             std::string l = argv[++i];
             std::transform(l.begin(), l.end(), l.begin(), ::tolower);
@@ -1570,12 +1946,16 @@ int main(int argc, char* argv[]) {
             run_pairs_trading_module(market_client);
         } else if (choice == "8") {
             run_drawdown_module(market_client);
+        } else if (choice == "9" || choice == "H") {
+            run_hft_lowlatency_module(market_client);
         } else if (choice == "D") {
             run_data_quality_dashboard(market_client);
         } else if (choice == "T") {
             run_theme_selector();
         } else if (choice == "V") {
             AutomatedTestSuite::run_all_tests();
+        } else if (choice == "W") {
+            run_web_dashboard_launcher(market_client);
         } else if (choice == "11") {
             print_about_info();
         } else {

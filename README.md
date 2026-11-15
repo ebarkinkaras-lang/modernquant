@@ -46,37 +46,41 @@
 * **Zero Overhead Architecture:** Thread-safe, header-only C++20 singleton (`include/quant/i18n.hpp`) with zero external runtime dependencies.
 
 ### 3. 🎯 Multi-Factor Quant Forecast, Microstructure & Multi-Currency FAVÖK Engine (`QuantForecastEngine` & `FundamentalEngine`)
-* **252-Trading-Day Grinold-Kahn Horizon Model:** Combines volatility-scaled 20d/60d momentum, 22-day Typical-Price Institutional VWAP & Wilder RSI-14 mean-reversion, OBV volume flow, recency-decayed word-boundary NLP sentiment, and horizon-weighted fundamental quality scores with Student-$t$ calibrated $\pm 1\sigma$ log-normal bands.
-* **Multi-Currency Institutional FAVÖK (EBITDA) & Valuation Engine (`fundamentals.hpp`):** Fetches trailing 12-month (TTM) financial statements via `fundamentals-timeseries` + `quoteSummary` and aligns functional reporting currencies (`USD`/`EUR`) with trading currencies (`TRY`/`EUR`/`USD`) using live FX rates—computing `EV/EBITDA (FD/FAVÖK)`, `Net Debt/EBITDA`, `EBITDA Margin`, `P/E`, `Forward P/E`, `P/B`, `ROE`, `ROA`, and `FCF Yield`, while cleanly distinguishing corporate equities, banks/insurers, and commodities/ETFs.
+* **252-Trading-Day Grinold-Kahn Horizon Model + Silahian Ch.4/7 Risk Enhancements:** Combines volatility-scaled 20d/60d momentum, 22-day Typical-Price Institutional VWAP & Wilder RSI-14 mean-reversion, OBV volume flow, causal Kaufman regime-confidence gating, recency-decayed word-boundary NLP sentiment, horizon-weighted fundamental quality scores, asymmetric Heston/jump-tail $\pm 1\sigma$ cones, and Cornish-Fisher 95% VaR/CVaR tail risk metrics.
+* **Multi-Currency Institutional FAVÖK (EBITDA) & Valuation Engine (`fundamentals.hpp`):** Thread-safe TTM financial fetching (`fundamentals-timeseries` + `quoteSummary`) aligning functional reporting currencies (`USD`/`EUR`) with trading currencies (`TRY`/`EUR`/`USD`) via live FX rates—computing `EV/EBITDA`, `Net Debt/EBITDA`, `EBITDA Margin`, `P/E`, `Forward P/E`, `P/B`, `ROE`, `ROA`, and `FCF Yield`.
+* **System Scalability & Observability (`data_telemetry.hpp` & `live_market_data.hpp`, Silahian Ch.3/5/6):** Lock-free `alignas(64)` atomic telemetry counters, thread-safe `TokenBucketRateLimiter`, `EndpointCircuitBreaker` (`Closed`/`Open`/`Half-Open`), and rolling `P50/P95/P99` latency SLO monitoring in `[D]`.
 * **Precious Metals Date-Aligned Live Synthesis:** Cross-calculates live **24K Gram Gold (`GRAM-ALTIN.TL`)** and **Gram Silver (`GRAM-GUMUS.TL`)** via date-aligned COMEX Ounces (`GC=F`, `SI=F`) $\times$ `USD/TRY` / 31.1034768.
 * **Causal 2-Year Walk-Forward Backtester (`ForecastBacktestEngine`):** Evaluates the exact live forecasting core out-of-sample across 2-year rolling windows with non-overlapping block $z$-statistics, Random-Walk MAPE benchmarks, and 10 bps transaction costs.
 
-### 3. 🎯 Asymmetric Alpha & Radar-Altı Screener (`QuantOpportunityScanner`)
-* **Crowded Trade Filter (Sürü Tuzağı Tespiti):** Identifies and warns against retail FOMO consensus trades where risk/reward is asymmetrical against the trader ($R:R \approx 1 : 0.35$).
+### 3. 🎯 Parallel Liquidity-Adjusted Asymmetric Alpha Screener (`QuantOpportunityScanner`)
+* **Bounded Parallel Workers (`std::async`) & Liquidity Slippage Adjustment:** Scans BIST, XETRA, and Wall Street universes concurrently and adjusts Risk/Reward into Net R:R after estimated IOR spread/depth slippage (`bps`).
+* **Sticky Dual-Stream Event-Shock Veto (`NewsSentimentEngine`):** Integrates positive/negative sticky memory states and downgrades assets hit by negative news event shocks before false technical bounce entries.
+* **Causal Historical `Time-IC` Predictability:** Computes strictly causal trailing 5-day Spearman Rank IC & directional hit rate per stock (`compute_trailing_predictability_`) into ranking and target adjustments.
+* **Crowded Trade Filter (Sürü Tuzağı Tespiti):** Identifies and warns against retail FOMO consensus trades where risk/reward is asymmetrical against the trader.
 * **Hidden Smart Money Accumulation:** Detects institutional accumulation ($OBV \ge +0.08$) while assets are still under the public radar.
-* **Volatility Squeeze ($\sigma_5 / \sigma_{20} \le 0.68$):** Pins explosive breakout candidates consolidating in tight coiled springs with asymmetric $1:3.7$ Risk/Reward profiles.
+* **Volatility Squeeze ($\sigma_5 / \sigma_{20} \le 0.72$):** Pins explosive breakout candidates consolidating in tight coiled springs with asymmetric Risk/Reward profiles.
 * **TradingView Pine Script v6 Indicator:** Native, zero-warning Pine Script v6 overlay indicator and screener dashboard included in `pinescript/ModernQuant_AlphaScreener_v6.pine`.
 
 ### 4. 🛡️ Regional Investment Advisor & Crisis Defense Shield (`QuantInvestmentAdvisor`)
-* **Multi-Market Portfolio Engine:**
+* **Multi-Market Portfolio Engine (Parallel Fetch + DPO + RMS):**
   * 🇹🇷 **Borsa İstanbul (BIST 100):** TRY allocation with automated macro crisis detection (e.g. MSCI downgrade shock shelter).
   * 🇩🇪 **Frankfurt XETRA (DAX 40):** EUR allocation incorporating German Federal Bund yield buffers and European defense super-cycle leaders (Rheinmetall, SAP).
   * 🇺🇸 **Wall Street (S&P 500 / NASDAQ):** USD allocation combining US Treasury bills with mega-cap AI infrastructure leaders.
-* **Dynamic Capital Protection:** Automatically routes $60\% - 80\%$ of capital into risk-free yield instruments (%45 TL PPF/Mevduat or US T-Bills) during systemic market panics, accumulating blue-chips via disciplined Dollar-Cost Averaging (DCA).
+* **Dynamic Portfolio Optimization (PSO + Causal RL) & Stress Testing:** Blends Silahian Ch.4 PSO/RL weights with Eigen covariance risk parity, enforces Ch.2/3 Pre-Trade RMS concentration caps (`<= 45%`), and evaluates `-15%` market shock & `2x` correlation crisis scenarios.
+* **Dynamic Capital Protection:** Automatically routes $60\% - 80\%$ of capital into risk-free yield instruments (%42.5 TL PPF/Mevduat or US T-Bills) during systemic market panics, accumulating blue-chips via disciplined Dollar-Cost Averaging (DCA).
 * **Actionable Execution Plan:** Computes exact lot counts, allocation capital, Take-Profit targets, and Stop-Loss levels.
 
 ### 4. 🤖 AI Quant Copilot (`QuantCopilot`)
-* **Natural Language Market Interface:** Query any stock, option, or macro question right inside the terminal:
-  * `"THYAO 1 ay hedef fiyat ve yönü ne?"`
-  * `"SPY backtest yap"`
-  * `"Piyasalar genel durum"`
-  * `"Black-Scholes opsiyon fiyatla"`
-* **Quant Divergence Detection:** Identifies *Bullish Divergences* (discounted dip accumulation) and *Bearish Confirmations* by cross-referencing news sentiment with institutional VWAP spreads.
+* **Natural Language Market Interface:** Query stocks, HFT LOB, Heston/Merton/Dupire models, stress tests, telemetry, or macro regimes right inside the terminal:
+  * `"THYAO favök ve hedef fiyat"`
+  * `"SPY heston dupire"`
+  * `"AAPL hft ior"`, `"NVDA stres testi"`
+  * `"SPY backtest yap"`, `"BIST fırsatlar"`
+* **Quant Divergence Detection:** Identifies *Bullish Divergences* and *Bearish Confirmations* by cross-referencing news sentiment with institutional VWAP spreads.
 
 ### 5. ⚡ Derivatives, Options & Stochastic Pricing
-* **Closed-Form Black-Scholes:** Analytical pricing for European Calls/Puts and exact first/second-order Greeks ($\Delta, \Gamma, \mathcal{V}, \Theta, \rho$).
-* **Secant Method Implied Volatility (IV):** High-precision root solver recovering volatility from market quotes.
-* **Multi-Threaded Monte Carlo (`std::async`):** Parallel simulation of path-dependent exotic options (Up-and-Out Barrier Calls) with pseudo-random normal distributions.
+* **Closed-Form Black-Scholes & Secant IV:** Analytical pricing for European Calls/Puts, exact Greeks ($\Delta, \Gamma, \mathcal{V}, \Theta, \rho$), and root-solved Implied Volatility.
+* **Stochastic & Local Volatility Monte Carlo (`std::async`):** Parallel simulation of GBM, Barrier options, **Heston Stochastic Volatility** (Cholesky Euler-MC), **Merton Jump-Diffusion** (Poisson log-normal jumps), and **Dupire Local Volatility Surfaces** ($\sigma_{\text{loc}}(S,t)$).
 * **Binomial Lattice Trees (Boost MultiArray):** Cox-Ross-Rubinstein (CRR) discrete trees for European and American early-exercise options.
 
 ### 6. 📐 Portfolio Risk & Linear Algebra (Eigen3)
@@ -116,6 +120,7 @@ The algorithms and financial formulas implemented in ModernQuantSuite are strict
 2. **Jason Strimpel**, *Python for Algorithmic Trading Cookbook* (Packt, 2024).
 3. **Yves Hilpisch**, *Python for Algorithmic Trading* (O'Reilly, 2021).
 4. **Marcos López de Prado**, *Advances in Financial Machine Learning* (Wiley, 2018).
+5. **Ariel Silahian**, *C++ High Performance for Financial Systems* (Packt, 2024).
 
 ---
 
@@ -200,9 +205,12 @@ cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 │ 6   [MACRO]    Sabit Getiri & Hazine Eğrisi C++20 ChronoDate, Bootstrapping, Düzensiz Tahviller, PCA │
 │ 7   [STAT]     Pairs Trading & Arbitraj     Kointegrasyon, Spread Z-Score, Ornstein-Uhlenbeck Half-Life │
 │ 8   [RISK]     Drawdown & VaR Analizi       Monte Carlo Shuffle, Parametrik & Nonparametrik Max DD │
+│ 9   [HFT/ML]   HFT Emir Defteri, IOR & Cache O(1) LOB, RMS, DRL IOR, Game-Theory MM & CPU Bench │
+│ D   [QUALITY]  Veri Kalite & Kaynak Sağlık Panosu API önbellek, FX kuru yaşı, veri bütünlüğü ve tamlık metrikleri │
 │ L   [LANG]     Dil / Language / Sprache     Türkçe 🇹🇷 / English 🇬🇧 / Deutsch 🇩🇪 │
 │ T   [TEMA]     Renk & 80s CRT Teması        Amber VT220, Yeşil VT100, VAX Cyan, Neon, CRT Titreşim │
 │ V   [TEST]     Otomatik Doğrulama Testi     Tüm kitap formülleri ve ground-truth numerik doğrulaması │
+│ W   [WEB-UI]   Görsel Araştırma Panosu (Web) React + FastAPI interaktif IC, ısı haritası & portföy UI │
 │ 11  [INFO]     Hakkında & Mimari            Kitap kaynakları, C++ standartları ve proje detayları │
 │ 0   [EXIT]     Çıkış                        Terminal uygulamasını kapat  │
 └───────────────────────────────────────────────────────────────────────────────┘
@@ -210,32 +218,43 @@ cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
 ---
 
+## 📊 Cross-Sectional Research Lab & Visual Web Dashboard (`[W]` / `--export-report`)
+
+* **Cross-Sectional Portfolio Backtest & Fake-Alpha Diagnostics (`cross_sectional_lab.hpp`):** Runs expanding multi-fold cross-sectional backtests (`Mean CS-IC`, `Q5-Q1` spread, transaction costs), Fake-Alpha bias decomposition (Volatility-Proxy & High-Vol-Only ablation), Look-Ahead Leakage invariance audit, and predictability metrics (`Accuracy`, `Lift`, `MCC`, `Macro-F1`).
+* **Interactive Research UI (`dashboard/`):** Export C++ CSV/JSON & OHLCV reports (`./bin/quant_suite --export-report US`) and launch the FastAPI + React/Vite dashboard:
+```bash
+python dashboard/start.py
+```
+
+---
+
 ## 🧪 Automated Verification Suite
 
-Run `./bin/quant_suite --test` or `make test` to execute the built-in textbook mathematical verification suite:
+Run `./bin/quant_suite --test` or `make test` to execute all 22 automated C++ verification tests:
 
 ```text
-=======================================================
-  RUNNING AUTOMATED TEXTBOOK VERIFICATION TEST SUITE   
-=======================================================
-
-[TEST 1] ChronoDate & Day Count Conventions (Chapter 7)           ✔ PASS
-[TEST 2] Black-Scholes, Greeks & Implied Volatility (Ch. 2 & 4)   ✔ PASS
-[TEST 3] Monte Carlo & Barrier Options (Chapter 6)                ✔ PASS
-[TEST 4] Binomial Lattice Option Pricing (Chapter 9)              ✔ PASS
-[TEST 5] Fixed Income & Bond Valuation (Chapter 7)                ✔ PASS
-[TEST 6] Eigen Linear Algebra, QR & PCA (Chapter 8)               ✔ PASS
-[TEST 7] Boost Accumulators & Drawdown Risk (Chapters 6 & 9)      ✔ PASS
-[TEST 8]  Grinold-Kahn Multi-Factor Target Price & Horizon Scaling   ✔ PASS
-[TEST 9]  Causal Walk-Forward Backtest & Non-Overlapping Blocks      ✔ PASS
-[TEST 10] Asymmetric Alpha Screener + Live Multi-Currency FAVÖK      ✔ PASS
-[TEST 11] Boost.JSON Null-Bar Alignment, Wilder ATR & Date Join      ✔ PASS
-[TEST 12] Word-Boundary NLP & Turkish UTF-8 Negation Sentiment       ✔ PASS
-[TEST 13] Multi-Currency FAVÖK (EBITDA), Bank & Commodity Engine     ✔ PASS
-
--------------------------------------------------------
-[PASS] ALL 13 QUANT, MICROSTRUCTURE & FAVÖK TESTS PASSED!
-=======================================================
+[TEST 1]  ChronoDate & Day Count Conventions (Chapter 7)                ✔ PASS
+[TEST 2]  Black-Scholes, Greeks & Implied Volatility (Ch. 2 & 4)        ✔ PASS
+[TEST 3]  Monte Carlo & Barrier Options (Chapter 6)                     ✔ PASS
+[TEST 4]  Binomial Lattice Option Pricing (Chapter 9)                   ✔ PASS
+[TEST 5]  Fixed Income & Bond Valuation (Chapter 7)                     ✔ PASS
+[TEST 6]  Eigen Linear Algebra, QR & PCA (Chapter 8)                    ✔ PASS
+[TEST 7]  Boost Accumulators & Drawdown Risk (Chapters 6 & 9)           ✔ PASS
+[TEST 8]  Grinold-Kahn Multi-Factor Target Price & Horizon Scaling      ✔ PASS
+[TEST 9]  Causal Walk-Forward Backtest & Non-Overlapping Blocks         ✔ PASS
+[TEST 10] Asymmetric Alpha Screener + FAVÖK, Sticky Shock & Time-IC     ✔ PASS
+[TEST 11] Boost.JSON Null-Bar Alignment, Wilder ATR & Date Join         ✔ PASS
+[TEST 12] Word-Boundary NLP & Turkish UTF-8 Negation Sentiment          ✔ PASS
+[TEST 13] Multi-Currency FAVÖK (EBITDA), Bank & Commodity Engine        ✔ PASS
+[TEST 14] Data Quality Telemetry, Scoring Integrity & Alerts            ✔ PASS
+[TEST 15] Intraday Bar Recovery, Dynamic Cache & Live Yield Wiring      ✔ PASS
+[TEST 16] Silahian Ch.2/3/6/7: SPSC Hub, O(1) Circular LOB, RMS & MM    ✔ PASS
+[TEST 17] DPO (PSO & RL), IOR Router, RL/OFI Backtests, Heston & Merton ✔ PASS
+[TEST 18] Dupire Local Vol, CircuitBreaker, Tail Forecast & Stress      ✔ PASS
+[TEST 19] Sticky 2-Stream Sentiment Memory, sent_strength & Event-Shock ✔ PASS
+[TEST 20] Cross-Sectional Portfolio Engine, CS-IC, Q-Spread & MCC       ✔ PASS
+[TEST 21] Fake-Alpha Diagnostics, Look-Ahead Seal & Robustness Suite    ✔ PASS
+[TEST 22] Dashboard CSV/JSON + OHLCV Export Contract Verification       ✔ PASS
 ```
 
 ---
@@ -250,36 +269,44 @@ ModernQuantSuite/
 ├── run.ps1 / run.bat         # Windows launcher scripts
 ├── LICENSE                   # MIT License
 ├── README.md                 # Project documentation & reference manual
-├── .gitignore                # Comprehensive Git ignore rules (bin, build, deps, IDEs)
+├── .gitignore                # Git ignore rules (bin, build, deps, node_modules, reports)
 ├── src/
 │   └── main.cpp              # Terminal CLI loop, interactive dispatcher, CRT rendering
+├── dashboard/
+│   ├── start.py              # Unified FastAPI + React/Vite launcher
+│   ├── backend/              # FastAPI REST API reading C++ CSV/JSON & OHLCV reports
+│   └── frontend/             # React 19 + Vite interactive quant research UI
 ├── include/
 │   └── quant/
 │       ├── advisor.hpp               # Regional covariance & FAVÖK capital allocation engine
-│       ├── alpha_screener.hpp        # Asymmetric OHLCV channel, squeeze & FAVÖK screener
+│       ├── alpha_screener.hpp        # Asymmetric OHLCV, Sticky Sentiment & Time-IC screener
 │       ├── backtester.hpp            # Causal technical strategy backtester (10bps cost)
 │       ├── binomial_lattice.hpp      # Binomial lattice option valuation (CRR)
 │       ├── black_scholes.hpp         # Analytical Black-Scholes & Greeks engine
 │       ├── bond.hpp                  # Fixed income bond valuation & day-count discounting
 │       ├── concepts.hpp              # C++20 concepts for financial type-safety
 │       ├── copilot.hpp               # Natural language AI Quant Copilot dispatcher
+│       ├── cross_sectional_lab.hpp   # Multi-fold CS backtest, Fake-Alpha, Look-Ahead seal & CSV/JSON export
+│       ├── data_quality.hpp          # Source health dashboard & quality scoring
+│       ├── data_telemetry.hpp        # Lock-free atomic telemetry, TokenBucketRateLimiter & CircuitBreaker
 │       ├── dates.hpp                 # C++20 chrono business calendar & weekend rolls
 │       ├── daycount.hpp              # ISDA Act/365, Act/360, 30/360 conventions
 │       ├── forecast_backtest.hpp     # 2-year causal walk-forward & block validation engine
-│       ├── forecast_engine.hpp       # 252-day Grinold-Kahn target pricing & FAVÖK integration
-│       ├── fundamentals.hpp          # Multi-currency TTM FAVÖK (EBITDA), Bank & Macro engine
+│       ├── forecast_engine.hpp       # 252-day Grinold-Kahn + asymmetric tail VaR/CVaR engine
+│       ├── fundamentals.hpp          # Thread-safe multi-currency TTM FAVÖK (EBITDA), Bank & Macro engine
+│       ├── hft_lob_engine.hpp        # O(1) Circular LOB, SPSC Lock-Free Hub, RMS, IOR, Nash MM & Ch.6 Bench
 │       ├── i18n.hpp                  # Trilingual (TR / EN / DE) localization engine
-│       ├── live_market_data.hpp      # Boost.JSON Yahoo Finance OHLCV, VWAP, EWMA & ATR client
-│       ├── monte_carlo.hpp           # Parallel std::async Monte Carlo simulation engine
-│       ├── news_sentiment.hpp        # Word-boundary, negation-aware & decayed NLP engine
+│       ├── live_market_data.hpp      # Thread-safe Boost.JSON Yahoo Finance client w/ RateLimiter & CircuitBreaker
+│       ├── monte_carlo.hpp           # Parallel Monte Carlo (GBM, Heston, Merton Jump, Dupire Local Vol & Barriers)
+│       ├── news_sentiment.hpp        # Dual-stream sticky sentiment, event-shock & negation-aware NLP
 │       ├── option_info.hpp           # Derivatives parameter definitions
-│       ├── pairs_trading.hpp         # Date-aligned OLS hedge ratio & OU half-life engine
+│       ├── pairs_trading.hpp         # Date-aligned OLS hedge ratio, OU half-life & IOR net-of-cost edge
 │       ├── payoff.hpp                # Polymorphic payoff functors (Call/Put)
-│       ├── portfolio_linear_algebra.hpp # Eigen matrix math, Cholesky, QR, and PCA
+│       ├── portfolio_linear_algebra.hpp # Eigen matrix math, Cholesky, DPO (PSO/RL), QR & PCA
 │       ├── terminal_chart.hpp        # Real OHLCV Unicode candlestick & Wilder RSI chart engine
-│       ├── test_suite.hpp            # 13-part automated quant & FAVÖK verification suite
+│       ├── test_suite.hpp            # 22-part automated quant, CS, HFT/LOB, resilience & FAVÖK verification suite
 │       ├── theme_engine.hpp          # 1980s retro CRT VT220/VT100 theme manager
-│       ├── trading_signals.hpp       # Boost Accumulators real-time streaming indicators
+│       ├── trading_signals.hpp       # Cache-aligned Boost streaming indicators, Drawdown & Stress Scenarios
 │       └── yield_curve.hpp           # US Treasury yield curve bootstrapping
 ├── pinescript/
 │   ├── ModernQuant_AlphaScreener_v6.pine # Official Pine Script v6 Screener & Overlay

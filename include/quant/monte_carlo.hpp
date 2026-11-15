@@ -7,6 +7,7 @@
 #include <numeric>
 #include <algorithm>
 #include <future>
+#include <thread>
 #include <chrono>
 
 namespace quant {
@@ -213,6 +214,227 @@ public:
         double price_up = calc_price_par(spot + dS, num_scenarios, seed);
         double price_dn = calc_price_par(spot - dS, num_scenarios, seed);
         return (price_up - price_dn) / (2.0 * dS);
+    }
+
+    // =========================================================================
+    // Ariel Silahian (Packt, 2024) Ch 7 - Advanced Derivative Pricing Models:
+    // 1. Merton Jump-Diffusion (GBM + Compound Poisson Jumps)
+    // 2. Heston Stochastic Volatility (Correlated Euler-Maruyama + Cholesky)
+    // =========================================================================
+    struct MertonJumpParams {
+        double jump_intensity = 0.75; // lambda: expected jumps/year
+        double jump_mean = -0.04;     // mu_j: mean log jump size
+        double jump_vol = 0.12;       // sigma_j: std dev of log jump size
+    };
+
+    struct HestonParams {
+        double v0 = 0.04;     // initial variance (sigma^2)
+        double kappa = 2.0;   // variance mean-reversion speed
+        double theta = 0.04;  // long-run variance
+        double xi = 0.35;     // volatility of variance (vol-of-vol)
+        double rho = -0.65;   // correlation between spot & variance Brownian motions
+    };
+
+    // Silahian (Packt, 2024) Ch.7: Dupire Local Volatility Surface sigma_loc(S, t)
+    struct DupireSurfaceParams {
+        double base_vol = 0.20;        // ATM local volatility at S0
+        double skew_slope = -0.18;     // b1 * ln(S/S0): negative skew increases downside local vol
+        double smile_convexity = 0.08; // b2 * ln^2(S/S0): wing smile convexity
+        double term_slope = 0.02;      // term-structure slope across sqrt(t)
+    };
+
+    double calc_merton_jump_price_par(double spot, const MertonJumpParams& jp,
+                                      unsigned num_scenarios, unsigned seed) const {
+        if (num_scenarios == 0 || spot <= 0.0) return 0.0;
+        const double expiry = opt_.time_to_expiration();
+        const double dt = expiry / static_cast<double>(std::max(1u, time_steps_));
+        const double sqrt_dt = std::sqrt(dt);
+        const double disc_factor = std::exp(-int_rate_ * expiry);
+
+        // Risk-neutral jump compensator k = E[Y - 1]
+        const double jump_comp = std::exp(jp.jump_mean + 0.5 * jp.jump_vol * jp.jump_vol) - 1.0;
+        const double lambda = std::max(0.0, jp.jump_intensity);
+        const double drift = (int_rate_ - div_rate_ - lambda * jump_comp - 0.5 * vol_ * vol_) * dt;
+        const double diff_vol = vol_ * sqrt_dt;
+
+        unsigned n_threads = std::thread::hardware_concurrency();
+        if (n_threads == 0) n_threads = 4;
+        n_threads = std::min(n_threads, num_scenarios);
+
+        unsigned batch_size = num_scenarios / n_threads;
+        unsigned remainder = num_scenarios % n_threads;
+        std::vector<std::future<double>> futures;
+        futures.reserve(n_threads);
+
+        for (unsigned t = 0; t < n_threads; ++t) {
+            unsigned count = batch_size + (t < remainder ? 1 : 0);
+            unsigned thread_seed = seed + t * 19937U + 7919U;
+            futures.push_back(std::async(std::launch::async, [=, this]() -> double {
+                std::mt19937_64 local_mt{thread_seed};
+                std::normal_distribution<double> nd(0.0, 1.0);
+                std::poisson_distribution<int> pois(lambda * dt);
+
+                double local_sum = 0.0;
+                for (unsigned i = 0; i < count; ++i) {
+                    double s = spot;
+                    bool hit = false;
+                    for (unsigned step = 0; step < time_steps_; ++step) {
+                        const double z = nd(local_mt);
+                        double jump_log = 0.0;
+                        if (lambda > 0.0) {
+                            const int n_jumps = pois(local_mt);
+                            if (n_jumps > 0) {
+                                jump_log = static_cast<double>(n_jumps) * jp.jump_mean +
+                                           std::sqrt(static_cast<double>(n_jumps)) * jp.jump_vol * nd(local_mt);
+                            }
+                        }
+                        s *= std::exp(drift + diff_vol * z + jump_log);
+                        if (barrier_type_ == BarrierType::up_and_out && s >= barrier_value_) hit = true;
+                        else if (barrier_type_ == BarrierType::down_and_out && s <= barrier_value_) hit = true;
+                    }
+                    if (!hit) {
+                        local_sum += disc_factor * opt_.option_payoff(s);
+                    }
+                }
+                return local_sum;
+            }));
+        }
+
+        double total = 0.0;
+        for (auto& f : futures) total += f.get();
+        return total / static_cast<double>(num_scenarios);
+    }
+
+    double calc_heston_mc_price_par(double spot, const HestonParams& hp,
+                                    unsigned num_scenarios, unsigned seed) const {
+        if (num_scenarios == 0 || spot <= 0.0) return 0.0;
+        const double expiry = opt_.time_to_expiration();
+        const double dt = expiry / static_cast<double>(std::max(1u, time_steps_));
+        const double sqrt_dt = std::sqrt(dt);
+        const double disc_factor = std::exp(-int_rate_ * expiry);
+
+        const double rho = std::clamp(hp.rho, -0.9999, 0.9999);
+        const double rho_perp = std::sqrt(std::max(0.0, 1.0 - rho * rho));
+        const double kappa = std::max(0.0, hp.kappa);
+        const double theta = std::max(0.0, hp.theta);
+        const double xi = std::max(0.0, hp.xi);
+        const double v0 = std::max(0.0, hp.v0);
+
+        unsigned n_threads = std::thread::hardware_concurrency();
+        if (n_threads == 0) n_threads = 4;
+        n_threads = std::min(n_threads, num_scenarios);
+
+        unsigned batch_size = num_scenarios / n_threads;
+        unsigned remainder = num_scenarios % n_threads;
+        std::vector<std::future<double>> futures;
+        futures.reserve(n_threads);
+
+        for (unsigned t = 0; t < n_threads; ++t) {
+            unsigned count = batch_size + (t < remainder ? 1 : 0);
+            unsigned thread_seed = seed + t * 31337U + 104729U;
+            futures.push_back(std::async(std::launch::async, [=, this]() -> double {
+                std::mt19937_64 local_mt{thread_seed};
+                std::normal_distribution<double> nd(0.0, 1.0);
+
+                double local_sum = 0.0;
+                for (unsigned i = 0; i < count; ++i) {
+                    double log_s = std::log(spot);
+                    double v = v0;
+                    bool hit = false;
+
+                    for (unsigned step = 0; step < time_steps_; ++step) {
+                        const double z1 = nd(local_mt);
+                        const double z2 = nd(local_mt);
+                        const double zs = z1;
+                        const double zv = rho * z1 + rho_perp * z2;
+
+                        // Full Truncation Euler-Maruyama scheme (preserves Feller stability)
+                        const double v_pos = std::max(0.0, v);
+                        const double sqrt_v_dt = std::sqrt(v_pos) * sqrt_dt;
+
+                        log_s += (int_rate_ - div_rate_ - 0.5 * v_pos) * dt + sqrt_v_dt * zs;
+                        v += kappa * (theta - v_pos) * dt + xi * sqrt_v_dt * zv;
+
+                        if (barrier_type_ != BarrierType::none) {
+                            const double cur_s = std::exp(log_s);
+                            if (barrier_type_ == BarrierType::up_and_out && cur_s >= barrier_value_) hit = true;
+                            else if (barrier_type_ == BarrierType::down_and_out && cur_s <= barrier_value_) hit = true;
+                        }
+                    }
+                    if (!hit) {
+                        local_sum += disc_factor * opt_.option_payoff(std::exp(log_s));
+                    }
+                }
+                return local_sum;
+            }));
+        }
+
+        double total = 0.0;
+        for (auto& f : futures) total += f.get();
+        return total / static_cast<double>(num_scenarios);
+    }
+
+    // Silahian (Packt, 2024) Ch.7: Dupire Local Volatility Monte Carlo Pricer (Parallel std::async)
+    double calc_dupire_local_vol_price_par(double spot, const DupireSurfaceParams& dp,
+                                           unsigned num_scenarios, unsigned seed) const {
+        if (num_scenarios == 0 || spot <= 0.0) return 0.0;
+        const double expiry = opt_.time_to_expiration();
+        const double dt = expiry / static_cast<double>(std::max(1u, time_steps_));
+        const double sqrt_dt = std::sqrt(dt);
+        const double disc_factor = std::exp(-int_rate_ * expiry);
+
+        unsigned n_threads = std::thread::hardware_concurrency();
+        if (n_threads == 0) n_threads = 4;
+        n_threads = std::min(n_threads, num_scenarios);
+
+        unsigned batch_size = num_scenarios / n_threads;
+        unsigned remainder = num_scenarios % n_threads;
+        std::vector<std::future<double>> futures;
+        futures.reserve(n_threads);
+
+        for (unsigned t = 0; t < n_threads; ++t) {
+            unsigned count = batch_size + (t < remainder ? 1 : 0);
+            unsigned thread_seed = seed + t * 48611U + 7919U;
+            futures.push_back(std::async(std::launch::async, [=, this]() -> double {
+                std::mt19937_64 local_mt{thread_seed};
+                std::normal_distribution<double> nd(0.0, 1.0);
+                const double log_s0 = std::log(spot);
+
+                double local_sum = 0.0;
+                for (unsigned i = 0; i < count; ++i) {
+                    double log_s = log_s0;
+                    bool hit = false;
+
+                    for (unsigned step = 0; step < time_steps_; ++step) {
+                        const double t_frac = static_cast<double>(step) * dt;
+                        const double moneyness = std::clamp(log_s - log_s0, -1.5, 1.5);
+                        const double loc_vol = std::clamp(
+                            dp.base_vol
+                            + dp.skew_slope * moneyness
+                            + dp.smile_convexity * moneyness * moneyness
+                            + dp.term_slope * std::sqrt(t_frac),
+                            0.02, 2.50
+                        );
+                        const double z = nd(local_mt);
+                        log_s += (int_rate_ - div_rate_ - 0.5 * loc_vol * loc_vol) * dt + loc_vol * sqrt_dt * z;
+
+                        if (barrier_type_ != BarrierType::none) {
+                            const double cur_s = std::exp(log_s);
+                            if (barrier_type_ == BarrierType::up_and_out && cur_s >= barrier_value_) hit = true;
+                            else if (barrier_type_ == BarrierType::down_and_out && cur_s <= barrier_value_) hit = true;
+                        }
+                    }
+                    if (!hit) {
+                        local_sum += disc_factor * opt_.option_payoff(std::exp(log_s));
+                    }
+                }
+                return local_sum;
+            }));
+        }
+
+        double total = 0.0;
+        for (auto& f : futures) total += f.get();
+        return total / static_cast<double>(num_scenarios);
     }
 
 private:

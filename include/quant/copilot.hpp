@@ -9,6 +9,9 @@
 #include "forecast_backtest.hpp"
 #include "alpha_screener.hpp"
 #include "data_quality.hpp"
+#include "hft_lob_engine.hpp"
+#include "monte_carlo.hpp"
+#include "trading_signals.hpp"
 #include "i18n.hpp"
 #include <string>
 #include <vector>
@@ -39,22 +42,127 @@ public:
             std::cout << I18n::tr(
                 "Merhaba! Ben Modern C++20 Kurumsal Quant Trading Copilot'ınızım.\n"
                 "  Borsa İstanbul (BIST), Frankfurt (XETRA), Wall Street ve Emtialar (Gram/Ons Altın, Gümüş) için:\n"
-                "  • Canlı fiyat, 22G VWAP, 14G OHLC ATR ve EWMA volatilite analizi\n"
-                "  • Kur-uyumlu TTM FAVÖK (EBITDA), FD/FAVÖK, Net Borç/FAVÖK, F/K, PD/DD ve ROE bilanço kartı\n"
-                "  • 252-iş günü kalibrasyonlu 1H / 1A / 3A hedef fiyat ve 2-yıllık Walk-Forward Backtest sunarım.\n"
-                "  Örnek: 'THYAO favök ve hedef fiyat', 'ASTOR bilanço', 'GRAM-ALTIN analiz', 'BIST fırsatlar'.\n",
+                "  • Canlı fiyat, 22G VWAP, 14G OHLC ATR, EWMA/Asimetrik Heston kuyruk riski (%95 VaR/CVaR)\n"
+                "  • Kur-uyumlu TTM FAVÖK (EBITDA), FD/FAVÖK, Net Borç/FAVÖK, F/K ve ROE bilanço kartı\n"
+                "  • Silahian (2024) Ch.2-7: SPSC HFT Emir Defteri (LOB), IOR Smart Router, Heston/Merton/Dupire & Stres Testi.\n"
+                "  Örnek: 'THYAO favök ve hedef', 'SPY heston', 'THYAO hft lob', 'NVDA stres testi', 'BIST fırsatlar'.\n",
 
                 "Hello! I am your Modern C++20 Institutional Quant Trading Copilot.\n"
                 "  For Borsa Istanbul (BIST), Frankfurt (XETRA), Wall Street, and Precious Metals:\n"
-                "  • Live spot, 22D VWAP, 14D OHLC ATR, and EWMA volatility diagnostics\n"
+                "  • Live spot, 22D VWAP, 14D ATR, asymmetric Heston tail bands & 95% VaR/CVaR\n"
                 "  • FX-aligned TTM EBITDA, EV/EBITDA, Net Debt/EBITDA, P/E, P/B, and ROE fundamental cards\n"
-                "  • 252-trading-day calibrated 1W / 1M / 3M forecasts and 2-year Walk-Forward Backtests.\n"
-                "  Examples: 'THYAO ebitda and target', 'AAPL fundamentals', 'GRAM-ALTIN forecast', 'US screener'.\n",
+                "  • Silahian (2024) Ch.2-7: SPSC HFT Order Book (LOB), IOR Smart Router, Heston/Merton/Dupire & Stress Tests.\n"
+                "  Examples: 'THYAO ebitda and target', 'SPY heston', 'AAPL hft ior', 'NVDA stress test', 'US screener'.\n",
 
                 "Hallo! Ich bin Ihr Modern C++20 Institutional Quant Trading Copilot.\n"
-                "  Live-Kurse, 22T-VWAP, 14T-ATR, währungsbereinigtes EBITDA (EV/EBITDA, Nettoschuld/EBITDA)\n"
-                "  sowie kalibrierte 1W/1M/3M-Zielkurse und 2-Jahres-Walk-Forward-Backtests.\n"
+                "  Live-Kurse, 22T-VWAP, 14T-ATR, asymmetrisches Tail-Risiko, EBITDA-Kennzahlen sowie\n"
+                "  Silahian (2024) HFT-Orderbuch (LOB), IOR Router, Heston/Merton/Dupire & Stresstests.\n"
             );
+            return;
+        }
+
+        // Silahian Ch.2/3/6/7: HFT Order Book (LOB), SPSC Ring Buffer, Pre-Trade RMS & IOR Execution Intent
+        if (lower_input.find("hft") != std::string::npos || lower_input.find("lob") != std::string::npos ||
+            lower_input.find("emir defteri") != std::string::npos || lower_input.find("order book") != std::string::npos ||
+            lower_input.find("orderbook") != std::string::npos || lower_input.find("ior") != std::string::npos ||
+            lower_input.find("smart router") != std::string::npos || lower_input.find("ring buffer") != std::string::npos ||
+            lower_input.find("rms") != std::string::npos || lower_input.find("nash") != std::string::npos) {
+
+            std::string sym = found_ticker.empty() ? "SPY" : LiveMarketDataClient::normalize_symbol(found_ticker);
+            auto live = client.fetch_asset_smart(sym, "6mo");
+            DataQualityDashboard::record_asset_quality(live);
+            const double spot = (live.current_price > 0.0) ? live.current_price : 100.0;
+            const double vol = (live.annualized_volatility > 0.01) ? live.annualized_volatility : 0.22;
+
+            const double tick = std::max(0.01, std::round((spot * 0.0005) * 100.0) / 100.0);
+            CircularArrayLOB lob(std::max(0.01, spot * 0.8), spot * 1.2, tick, 256);
+            const double spr = std::max(tick, spot * 0.0008);
+            lob.add_order(101ULL, OrderSide::Buy,  spot - spr, 600);
+            lob.add_order(102ULL, OrderSide::Sell, spot + spr, 550);
+            auto m = lob.analytics();
+            auto q = GameTheoreticQuoter::compute_nash_quotes(
+                (m.mid_price > 0.0 ? m.mid_price : spot),
+                (m.micro_price > 0.0 ? m.micro_price : spot),
+                m.l1_imbalance, 0, vol);
+            IntelligentOrderRouter ior;
+            auto exec = ior.simulate_parent_order(spot, vol, 14.0, 2500, 120, 42);
+
+            std::cout << std::format("{} [Silahian Ch.2/3/7 HFT LOB + Nash MM + IOR Router] ({} @ {:.2f}):\n"
+                                     "  • LOB Best Bid/Ask : {:.2f} / {:.2f} (O(1) Circular Array, OBI: {:+.2f})\n"
+                                     "  • Nash Market Maker: Bid {:.2f} │ Ask {:.2f} (Reserve: {:.2f})\n"
+                                     "  • IOR Smart Exec   : 2500 lot VWAP={:.2f} │ Slippage={:.2f} bps (Naive: {:.2f} bps)\n",
+                                     live.is_live ? "🟢 CANLI" : "🟡 SİMÜLASYON", live.symbol, spot,
+                                     m.best_bid, m.best_ask, m.l1_imbalance,
+                                     q.optimal_bid, q.optimal_ask, q.reservation_price,
+                                     exec.ior_vwap, exec.ior_shortfall_bps, exec.naive_shortfall_bps);
+            return;
+        }
+
+        // Silahian Ch.7: Heston Stochastic Vol / Merton Jump-Diffusion / Dupire Local Vol Intent
+        if (lower_input.find("heston") != std::string::npos || lower_input.find("merton") != std::string::npos ||
+            lower_input.find("dupire") != std::string::npos || lower_input.find("stokastik") != std::string::npos ||
+            lower_input.find("stochastic") != std::string::npos || lower_input.find("local vol") != std::string::npos ||
+            lower_input.find("yerel vol") != std::string::npos) {
+
+            std::string sym = found_ticker.empty() ? "SPY" : LiveMarketDataClient::normalize_symbol(found_ticker);
+            auto live = client.fetch_asset_smart(sym, "6mo");
+            auto yc = client.fetch_treasury_yields();
+            DataQualityDashboard::record_asset_quality(live);
+            const double spot = (live.current_price > 0.0) ? live.current_price : 500.0;
+            const double strike = std::round(spot);
+            const double vol = (live.annualized_volatility > 0.01) ? live.annualized_volatility : 0.20;
+            const double r = (yc.is_live && yc.three_month_yield > 0.0) ? yc.three_month_yield : 0.045;
+
+            BlackScholes bs{strike, spot, 0.5, PayoffType::Call, r, 0.0};
+            OptionInfo opt{std::make_unique<CallPayoff>(strike), 0.5};
+            MCOptionValuation mc{std::move(opt), 48, vol, r, 0.0};
+            MCOptionValuation::HestonParams hp{vol * vol, 2.2, vol * vol, std::clamp(vol * 1.4, 0.20, 0.55), -0.68};
+            MCOptionValuation::MertonJumpParams jp{0.85, -0.05, 0.14};
+            MCOptionValuation::DupireSurfaceParams dp{vol, -0.18, 0.08, 0.02};
+
+            std::cout << std::format("{} [Silahian Ch.7 Türev Model Karşılaştırması] ({} ATM Call S=K={:.2f}, T=0.5y, σ={:.1f}%):\n"
+                                     "  • Black-Scholes (Referans) : {:.4f}\n"
+                                     "  • Heston Stokastik Vol     : {:.4f} (κ=2.2, ρ=-0.68)\n"
+                                     "  • Merton Jump-Diffusion    : {:.4f} (λ=0.85, μ_J=-5%)\n"
+                                     "  • Dupire Local Vol Yüzeyi  : {:.4f} (skew=-0.18, smile=0.08)\n",
+                                     live.is_live ? "🟢 CANLI" : "🟡 SİMÜLASYON", live.symbol, spot, vol * 100.0,
+                                     bs(vol),
+                                     mc.calc_heston_mc_price_par(spot, hp, 16000, 101),
+                                     mc.calc_merton_jump_price_par(spot, jp, 16000, 202),
+                                     mc.calc_dupire_local_vol_price_par(spot, dp, 16000, 303));
+            return;
+        }
+
+        // Silahian Ch.4: Multi-Scenario Stress Test & Tail Risk Intent
+        if (lower_input.find("stress") != std::string::npos || lower_input.find("stres") != std::string::npos ||
+            lower_input.find("cvar") != std::string::npos || lower_input.find("kuyruk") != std::string::npos ||
+            lower_input.find("tail risk") != std::string::npos) {
+
+            std::string sym = found_ticker.empty() ? "SPY" : LiveMarketDataClient::normalize_symbol(found_ticker);
+            auto live = client.fetch_asset_smart(sym, "1y");
+            DataQualityDashboard::record_asset_quality(live);
+            std::vector<double> rets;
+            const auto& cl = live.historical_prices;
+            for (size_t i = 1; i < cl.size(); ++i) {
+                if (cl[i - 1] > 0.0 && cl[i] > 0.0) rets.push_back((cl[i] - cl[i - 1]) / cl[i - 1]);
+            }
+            auto st = DrawdownRiskEngine::run_stress_scenarios(rets, 100000.0, 12.0);
+            std::cout << std::format("{} [Silahian Ch.4 Kuyruk & Stres Analizi] ({}, Portföy=100,000 {}):\n"
+                                     "  • Tarihsel %95 / %99 VaR (1G) : {:.0f} / {:.0f}\n"
+                                     "  • Expected Shortfall (CVaR 95): {:.0f}\n"
+                                     "  • -%15 Piyasa Şoku / 2x Likidite Donması: -{:.0f} / -{:.0f}\n",
+                                     live.is_live ? "🟢 CANLI" : "🟡 SİMÜLASYON", live.symbol, live.currency_display,
+                                     st.hist_var_95, st.hist_var_99, st.cvar_95,
+                                     st.market_crash_15pct_loss, st.vol_2x_liquidity_freeze_loss);
+            return;
+        }
+
+        // Silahian Ch.3/5: System Latency SLO, Circuit Breaker & Telemetry Intent
+        if (found_ticker.empty() &&
+            (lower_input.find("latency") != std::string::npos || lower_input.find("gecikme") != std::string::npos ||
+             lower_input.find("circuit") != std::string::npos || lower_input.find("devre") != std::string::npos ||
+             lower_input.find("telemetri") != std::string::npos || lower_input.find("telemetry") != std::string::npos)) {
+            DataQualityDashboard::render_dashboard();
             return;
         }
 
@@ -260,7 +368,7 @@ public:
             std::format("Live-Markt- & Fundamental-Engine wird für '{}' abgefragt...\n", found_ticker)
         );
 
-        auto data = client.fetch_asset_smart(found_ticker, "6mo");
+        auto data = client.fetch_asset_smart(found_ticker, "1y");
         found_ticker = data.symbol;
 
         if (data.current_price <= 0.0) {
@@ -417,7 +525,10 @@ private:
             "çarpanlar", "carpanlar", "fk", "pddd", "roe", "roa", "fcf", "fd", "ev", "borç", "borc", "net", "nakit",
             "marj", "marji", "marjı", "kâr", "kar", "zarar", "gelir", "ciro", "temettü", "temettu", "değerleme", "degerleme",
             "haber", "haberler", "haberleri", "sentiment", "sentimel", "makro", "duygu", "faiz", "faizler", "hazine",
-            "opsiyon", "black", "scholes", "isabet", "başarı", "basari", "geçmiş", "gecmis", "doğru", "dogru",
+            "opsiyon", "black", "scholes", "heston", "merton", "dupire", "stokastik", "stochastic", "local", "yerel",
+            "hft", "lob", "emir", "defteri", "order", "book", "orderbook", "ior", "router", "smart", "ring", "buffer", "rms", "nash",
+            "dpo", "pso", "stress", "stres", "testi", "cvar", "kuyruk", "tail", "latency", "gecikme", "circuit", "devre", "telemetri", "telemetry", "cache", "yap", "vol", "jump", "vs",
+            "isabet", "başarı", "basari", "geçmiş", "gecmis", "doğru", "dogru",
             "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "12", "14", "15", "20", "21", "30", "45", "60", "63", "90", "120", "180", "252", "365",
             "ay", "aylik", "aylık", "hafta", "haftalik", "haftalık", "gun", "gün", "gunluk", "günlük",
             "sene", "yil", "yıl", "yillik", "yıllık", "vade", "vadeli", "bir", "iki", "uc", "üç", "dort", "dört",

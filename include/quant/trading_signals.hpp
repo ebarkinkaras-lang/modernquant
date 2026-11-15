@@ -15,8 +15,8 @@ namespace quant {
 
 namespace bacc = boost::accumulators;
 
-// Chapter 9: Real-time technical indicator bar containing Bollinger Bands & Dual MA
-struct IndicatorPoint {
+// Chapter 9 & Silahian (Packt, 2024) Ch.6 Cache-Aligned Real-Time Streaming Technical Indicator Point
+struct alignas(64) IndicatorPoint {
     double price{0.0};
     double rolling_mean{0.0};
     double upper_band{0.0};
@@ -110,8 +110,44 @@ struct DrawdownAnalysisResult {
     double nonparametric_99_dd{0.0};
 };
 
+struct StressScenarioResult {
+    double hist_var_95{0.0};
+    double hist_var_99{0.0};
+    double cvar_95{0.0};
+    double market_crash_15pct_loss{0.0};
+    double vol_2x_liquidity_freeze_loss{0.0};
+    double liquidity_haircut_cost{0.0};
+};
+
 class DrawdownRiskEngine {
 public:
+    // Silahian (Packt, 2024) Ch.4: Multi-Scenario Stress Test, Historical VaR/ES & Liquidity Freeze
+    static StressScenarioResult run_stress_scenarios(const std::vector<double>& returns,
+                                                     double notional,
+                                                     double slippage_bps = 12.0) {
+        StressScenarioResult sr;
+        if (returns.size() < 5 || notional <= 0.0) return sr;
+
+        std::vector<double> sorted = returns;
+        std::ranges::sort(sorted);
+
+        size_t n = sorted.size();
+        size_t i95 = std::min(n - 1, static_cast<size_t>(std::floor(0.05 * static_cast<double>(n))));
+        size_t i99 = std::min(n - 1, static_cast<size_t>(std::floor(0.01 * static_cast<double>(n))));
+
+        sr.hist_var_95 = std::max(0.0, -sorted[i95] * notional);
+        sr.hist_var_99 = std::max(0.0, -sorted[i99] * notional);
+
+        double tail_sum = 0.0;
+        size_t tail_cnt = i95 + 1;
+        for (size_t k = 0; k < tail_cnt; ++k) tail_sum += -sorted[k];
+        sr.cvar_95 = std::max(sr.hist_var_95, (tail_sum / static_cast<double>(tail_cnt)) * notional);
+
+        sr.market_crash_15pct_loss = notional * 0.15;
+        sr.liquidity_haircut_cost = notional * std::clamp((slippage_bps * 3.0) / 10000.0, 0.0005, 0.05);
+        sr.vol_2x_liquidity_freeze_loss = (2.0 * sr.cvar_95) + sr.liquidity_haircut_cost;
+        return sr;
+    }
     static DrawdownAnalysisResult analyze(const std::vector<double>& pnl_series,
                                           unsigned num_simulations = 1000,
                                           unsigned seed = 42) {

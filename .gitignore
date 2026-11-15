@@ -61,3 +61,20 @@ install_manifest.txt
 
 # Local Dependency Caches
 deps/
+
+# Python & FastAPI Research Backend
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+
+# React / Vite Frontend Build & Dependencies
+node_modules/
+dashboard/frontend/dist/
+.vite/
+
+# Runtime Reports, OHLCV Exports & Temporary Caches
+reports/
+*.tmp

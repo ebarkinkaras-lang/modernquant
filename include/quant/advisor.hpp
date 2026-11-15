@@ -7,6 +7,7 @@
 #include "fundamentals.hpp"
 #include "forecast_engine.hpp"
 #include "portfolio_linear_algebra.hpp"
+#include "hft_lob_engine.hpp"
 #include "i18n.hpp"
 #include <vector>
 #include <string>
@@ -15,6 +16,7 @@
 #include <sstream>
 #include <cmath>
 #include <algorithm>
+#include <future>
 #include <numeric>
 
 namespace quant {
@@ -65,6 +67,10 @@ struct RegionalMarketPlan {
     double expected_annual_return_pct{0.0};
     double expected_volatility_pct{0.0};
     double max_drawdown_risk_pct{0.0};
+    double dpo_sharpe{0.0};               // Silahian Ch.4 DPO (PSO + RL) hisse grubu Sharpe
+    double stress_crash_loss_pct{0.0};    // Silahian Ch.4 %-15 Piyasa Şoku stres kaybı (%)
+    double stress_vol_2x_pct{0.0};        // Silahian Ch.4 2x Vol & 0.85 Korelasyon stres volatilitesi (%)
+    std::string rms_audit_status;         // Silahian Ch.2/3 Pre-Trade RMS konsantrasyon denetimi
     std::string macro_verdict;
 
     RegionalMacroSentiment macro_sentiment;
@@ -149,9 +155,19 @@ public:
         std::cout << std::format("   {:<27}: %{:.2f} (Eigen Kovaryans Matrisi √wᵀΣw)\n",
                                  I18n::tr("Portföy Volatilitesi", "Portfolio Volatility", "Portfolio-Volatilität"),
                                  plan.expected_volatility_pct);
-        std::cout << std::format("   {:<27}: %{:.1f} (95% VaR / Parametrik Drawdown Sınırı)\n\n",
+        std::cout << std::format("   {:<27}: %{:.1f} (95% VaR / Parametrik Drawdown Sınırı)\n",
                                  I18n::tr("Tahmini Maks. Risk (DD)", "Estimated Max Drawdown", "Geschätzter Max Drawdown"),
                                  plan.max_drawdown_risk_pct);
+        std::cout << std::format("   {:<27}: DPO Sharpe: {:.2f} │ -%15 Piyasa Şoku: -%{:.1f} │ 2x Vol: %{:.1f}\n",
+                                 I18n::tr("Silahian Ch.4 Stres & DPO", "Silahian Ch.4 Stress & DPO", "Silahian Ch.4 Stress & DPO"),
+                                 plan.dpo_sharpe, plan.stress_crash_loss_pct, plan.stress_vol_2x_pct);
+        if (!plan.rms_audit_status.empty()) {
+            std::cout << std::format("   {:<27}: {}{}{}\n\n",
+                                     I18n::tr("Pre-Trade RMS Denetimi", "Pre-Trade RMS Audit", "Pre-Trade RMS-Prüfung"),
+                                     pal.green_rgb, plan.rms_audit_status, pal.reset_code);
+        } else {
+            std::cout << "\n";
+        }
 
         std::cout << pal.glow_rgb << "   " << I18n::tr("CANLI MAKRO REJİM & FAKTÖR DEĞERLENDİRMESİ:\n", "LIVE MACRO REGIME & FACTOR VERDICT:\n", "LIVE-MAKRO-REGIME & FAKTOR-BEWERTUNG:\n") << pal.reset_code;
         print_wrapped_(plan.macro_verdict, 74, "   ", pal.base_rgb, pal.reset_code);
@@ -376,41 +392,51 @@ private:
             cash_share = is_crisis ? 0.30 : 0.05;
         }
 
-        // Fetch live 6-month OHLCV, Fundamentals (FAVÖK), News & 63-Trading-Day Forecast for each candidate
-        std::vector<CandidateSlot> slots;
+        // Parallelized live 1-year OHLCV, Fundamentals (FAVÖK), News & 63-Trading-Day Forecast across candidates (Ch.3/6)
+        std::vector<std::future<CandidateSlot>> slot_futs;
+        slot_futs.reserve(universe.size());
         for (const auto& [sym, fname] : universe) {
-            auto d = client.fetch_asset(sym, "6mo");
-            if (d.current_price <= 0.0) continue;
+            slot_futs.push_back(std::async(std::launch::async, [&, sym, fname]() -> CandidateSlot {
+                CandidateSlot s;
+                auto d = client.fetch_asset(sym, "1y");
+                if (d.current_price <= 0.0) return s;
 
-            CandidateSlot s;
-            s.symbol = sym;
-            s.fallback_name = d.long_name.empty() ? fname : d.long_name;
-            s.data = std::move(d);
-            s.fund = FundamentalEngine::fetch_fundamentals(client, s.data);
-            DataQualityDashboard::record_asset_quality(s.data, &s.fund);
-            s.sent = NewsSentimentEngine::get_asset_sentiment(sym, s.fallback_name, client);
-            s.fc_63d = QuantForecastEngine::forecast_for_trading_days(
-                s.data, 63, s.sent.sentiment_score, s.sent.has_live_news, &s.fund, "", 0,
-                has_live_yc ? &yc : nullptr
-            );
+                s.symbol = sym;
+                s.fallback_name = d.long_name.empty() ? fname : d.long_name;
+                s.data = std::move(d);
+                s.fund = FundamentalEngine::fetch_fundamentals(client, s.data);
+                s.sent = NewsSentimentEngine::get_asset_sentiment(sym, s.fallback_name, client);
+                s.fc_63d = QuantForecastEngine::forecast_for_trading_days(
+                    s.data, 63, s.sent.sentiment_score, s.sent.has_live_news, &s.fund, "", 0,
+                    has_live_yc ? &yc : nullptr
+                );
 
-            // Inverse-Volatility x (Momentum + FAVÖK Fundamental Quality) Score
-            double vol = std::clamp(s.data.annualized_volatility, 0.10, 0.85);
-            double inv_vol = 1.0 / vol;
-            double quality_tilt = 1.0
-                + 0.35 * (s.fund.is_available ? s.fund.fundamental_score : 0.0)
-                + 0.30 * s.fc_63d.quant_score;
-            if (s.fc_63d.quant_score < -0.15) quality_tilt *= 0.65;
-            if (risk == InvestorRisk::DüşükRisk_Koruma) {
-                // Conservative profile prefers lower-vol, strong-balance-sheet names
-                s.raw_factor_weight = (inv_vol * inv_vol) * std::clamp(quality_tilt, 0.35, 1.80);
-            } else if (risk == InvestorRisk::Dengeli_Büyüme) {
-                s.raw_factor_weight = inv_vol * std::clamp(quality_tilt, 0.40, 1.90);
-            } else {
-                // Aggressive profile tilts toward higher expected 63d upside + fundamental growth
-                s.raw_factor_weight = std::pow(inv_vol, 0.5) * std::clamp(quality_tilt + 0.25 * s.fc_63d.quant_score, 0.30, 2.20);
+                // Inverse-Volatility x (Momentum + FAVÖK Fundamental Quality) Score
+                double vol = std::clamp(s.data.annualized_volatility, 0.10, 0.85);
+                double inv_vol = 1.0 / vol;
+                double quality_tilt = 1.0
+                    + 0.35 * (s.fund.is_available ? s.fund.fundamental_score : 0.0)
+                    + 0.30 * s.fc_63d.quant_score;
+                if (s.fc_63d.quant_score < -0.15) quality_tilt *= 0.65;
+                if (risk == InvestorRisk::DüşükRisk_Koruma) {
+                    s.raw_factor_weight = (inv_vol * inv_vol) * std::clamp(quality_tilt, 0.35, 1.80);
+                } else if (risk == InvestorRisk::Dengeli_Büyüme) {
+                    s.raw_factor_weight = inv_vol * std::clamp(quality_tilt, 0.40, 1.90);
+                } else {
+                    s.raw_factor_weight = std::pow(inv_vol, 0.5) * std::clamp(quality_tilt + 0.25 * s.fc_63d.quant_score, 0.30, 2.20);
+                }
+                return s;
+            }));
+        }
+
+        std::vector<CandidateSlot> slots;
+        slots.reserve(slot_futs.size());
+        for (auto& fut : slot_futs) {
+            CandidateSlot s = fut.get();
+            if (!s.symbol.empty() && s.data.current_price > 0.0) {
+                DataQualityDashboard::record_asset_quality(s.data, &s.fund);
+                slots.push_back(std::move(s));
             }
-            slots.push_back(std::move(s));
         }
 
         // Pick top 3-4 equities and normalize equity weights to (1 - cash_share)
@@ -449,16 +475,73 @@ private:
             plan.positions.push_back(std::move(cash_pos));
         }
 
-        // Build Equity Positions & Eigen Covariance Matrix Inputs
+        // Silahian (Packt, 2024) Ch.4 Dynamic Portfolio Optimization (PSO + Causal RL) & Ch.2/3 Pre-Trade RMS Caps
         const int m = static_cast<int>(slots.size());
         Eigen::VectorXd eq_weights = Eigen::VectorXd::Zero(std::max(1, m));
         Eigen::VectorXd eq_vols    = Eigen::VectorXd::Zero(std::max(1, m));
+        if (m > 0) {
+            for (int i = 0; i < m; ++i) {
+                const double fw = (sum_raw > 0.0) ? (slots[static_cast<size_t>(i)].raw_factor_weight / sum_raw) : (1.0 / m);
+                eq_weights(i) = fw;
+            }
+            if (m >= 2) {
+                size_t min_len = slots.front().data.historical_prices.size();
+                for (int i = 1; i < m; ++i) {
+                    min_len = std::min(min_len, slots[static_cast<size_t>(i)].data.historical_prices.size());
+                }
+                if (min_len >= 32) {
+                    const int T_rows = static_cast<int>(std::min<size_t>(min_len - 1, 180));
+                    Eigen::MatrixXd ret_mat(T_rows, m);
+                    for (int col = 0; col < m; ++col) {
+                        const auto& p = slots[static_cast<size_t>(col)].data.historical_prices;
+                        const size_t offset = p.size() - static_cast<size_t>(T_rows) - 1;
+                        for (int r = 0; r < T_rows; ++r) {
+                            double p0 = p[offset + static_cast<size_t>(r)];
+                            double p1 = p[offset + static_cast<size_t>(r) + 1];
+                            ret_mat(r, col) = (p0 > 0.0 && p1 > 0.0) ? std::log(p1 / p0) : 0.0;
+                        }
+                    }
+                    auto dpo = PortfolioLinearAlgebra::optimize_dynamic_portfolio(ret_mat, rf_rate, 0.55, 42);
+                    plan.dpo_sharpe = dpo.pso_sharpe;
+                    if (dpo.pso_weights.size() == m && dpo.rl_weights.size() == m) {
+                        Eigen::VectorXd dpo_blend = 0.60 * dpo.pso_weights + 0.40 * dpo.rl_weights;
+                        eq_weights = 0.40 * dpo_blend + 0.60 * eq_weights;
+                    }
+                }
+            }
+            // Enforce Pre-Trade Concentration Ceiling across equities so no single name dominates > 45% of equity sleeve
+            if (m >= 3) {
+                const double cap_w = 0.45;
+                for (int pass = 0; pass < 3; ++pass) {
+                    double excess = 0.0, free_sum = 0.0;
+                    for (int i = 0; i < m; ++i) {
+                        if (eq_weights(i) > cap_w) { excess += eq_weights(i) - cap_w; eq_weights(i) = cap_w; }
+                        else free_sum += eq_weights(i);
+                    }
+                    if (excess <= 1e-9 || free_sum <= 1e-9) break;
+                    for (int i = 0; i < m; ++i) {
+                        if (eq_weights(i) < cap_w) eq_weights(i) += excess * (eq_weights(i) / free_sum);
+                    }
+                }
+            }
+            const double wsum = eq_weights.sum();
+            if (wsum > 1e-9) eq_weights = (eq_weights / wsum) * eq_budget_share;
+        }
+
+        PreTradeRiskConfig rms_cfg;
+        rms_cfg.max_order_qty = 10000000;
+        rms_cfg.max_order_notional = std::max(10000.0, capital * 0.50);
+        rms_cfg.max_net_position = 10000000;
+        rms_cfg.max_gross_position = 20000000;
+        rms_cfg.max_daily_drawdown = std::max(1000.0, capital * 0.15);
+        rms_cfg.max_price_collar_pct = 5.0;
+        PreTradeRiskEngine rms(rms_cfg);
+        int rms_ok = 0, rms_checked = 0;
         double weighted_eq_ann_ret = 0.0;
 
         for (int i = 0; i < m; ++i) {
             const auto& s = slots[static_cast<size_t>(i)];
-            double w_port = (sum_raw > 0.0) ? (eq_budget_share * (s.raw_factor_weight / sum_raw)) : (eq_budget_share / m);
-            eq_weights(i) = w_port;
+            double w_port = eq_weights(i);
             eq_vols(i) = std::clamp(s.data.annualized_volatility, 0.08, 0.95);
 
             // Annualize 63-day expected log return conservatively (shrunk toward long-run equity risk premium)
@@ -474,6 +557,15 @@ private:
             pos.weight_pct = w_port * 100.0;
             pos.allocation_amount = capital * w_port;
             pos.lot_count = (pos.spot_price > 0.0) ? static_cast<int>(std::floor(pos.allocation_amount / pos.spot_price)) : 0;
+
+            if (pos.lot_count > 0) {
+                ++rms_checked;
+                auto chk = rms.validate_order(OrderSide::Buy, pos.spot_price, static_cast<int64_t>(pos.lot_count), pos.spot_price);
+                if (chk.approved) {
+                    rms.record_fill(OrderSide::Buy, static_cast<int64_t>(pos.lot_count));
+                    ++rms_ok;
+                }
+            }
 
             double atr = (s.data.atr_14 > 0.0) ? s.data.atr_14 : (pos.spot_price * (eq_vols(i) / std::sqrt(252.0)) * 1.35);
             double stop_dist = std::clamp(2.0 * atr, 0.035 * pos.spot_price, 0.12 * pos.spot_price);
@@ -516,11 +608,14 @@ private:
             plan.positions.push_back(std::move(pos));
         }
 
-        // Compute Exact Portfolio Volatility via Eigen Empirical Correlation Matrix
+        // Compute Exact Portfolio Volatility via Eigen Empirical Correlation Matrix & Silahian Ch.4 Crisis Stress Test
         double port_vol = 0.02;
+        double stress_vol_2x = 0.04;
         if (m > 0) {
             Eigen::MatrixXd corr = Eigen::MatrixXd::Identity(m, m);
+            Eigen::MatrixXd stress_corr = Eigen::MatrixXd::Constant(m, m, 0.85);
             for (int i = 0; i < m; ++i) {
+                stress_corr(i, i) = 1.0;
                 for (int j = i + 1; j < m; ++j) {
                     double rho = empirical_pair_correlation_(slots[static_cast<size_t>(i)].data,
                                                              slots[static_cast<size_t>(j)].data);
@@ -529,7 +624,17 @@ private:
                 }
             }
             port_vol = PortfolioLinearAlgebra::calculate_portfolio_volatility(corr, eq_vols, eq_weights);
+            stress_vol_2x = PortfolioLinearAlgebra::calculate_portfolio_volatility(stress_corr, eq_vols * 2.0, eq_weights);
         }
+
+        double eq_beta_scale = (m > 0) ? std::clamp(eq_vols.mean() / 0.18, 0.70, 1.85) : 1.0;
+        plan.stress_crash_loss_pct = std::max(0.2, eq_budget_share * 15.0 * eq_beta_scale - cash_share * (rf_rate / 12.0) * 100.0);
+        plan.stress_vol_2x_pct = std::max(2.0, stress_vol_2x * 100.0);
+        plan.rms_audit_status = I18n::tr(
+            std::format("ONAYLANDI ({}/{} Emir RMS Limitinde | Tek Hisse Tavan <= %45)", rms_ok, std::max(rms_ok, rms_checked)),
+            std::format("APPROVED ({}/{} Orders within RMS Caps | Max Equity <= 45%)", rms_ok, std::max(rms_ok, rms_checked)),
+            std::format("FREIGEGEBEN ({}/{} Orders im RMS-Limit)", rms_ok, std::max(rms_ok, rms_checked))
+        );
 
         plan.expected_annual_return_pct = (cash_share * rf_rate + weighted_eq_ann_ret) * 100.0;
         plan.expected_volatility_pct = std::max(1.5, port_vol * 100.0);

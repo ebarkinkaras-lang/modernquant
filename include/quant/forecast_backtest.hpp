@@ -77,8 +77,7 @@ public:
                                                             const std::string& raw_symbol,
                                                             int horizon_days = 5,
                                                             const std::string& range = "2y") {
-        std::string symbol = LiveMarketDataClient::normalize_symbol(raw_symbol);
-        auto data = client.fetch_asset(symbol, range);
+        auto data = client.fetch_asset_smart(raw_symbol, range);
         return evaluate_on_asset_data(data, horizon_days, range);
     }
 
@@ -99,8 +98,8 @@ public:
         const size_t N = prices.size();
         const size_t h_step = static_cast<size_t>(rep.horizon_days);
 
-        // Use 60-day causal warmup on 1y/2y histories; gracefully adapt to 30-day warmup on shorter 6mo slices
-        const size_t window = (N >= 140 + h_step) ? 60 : 30;
+        // Adaptive causal warmup: 60d on 1y/2y histories, 30d on 3-6mo slices, 15d for newer IPOs
+        const size_t window = (N >= 140 + h_step) ? 60 : ((N >= 45 + h_step) ? 30 : 15);
         if (N < window + h_step + 5) {
             return rep;
         }
@@ -124,6 +123,7 @@ public:
         std::vector<double> daily_strat_rets;
 
         bool in_position = false;
+        double pos_weight = 0.0;
         double entry_capital = capital;
         int trades = 0;
         int win_trades = 0;
@@ -144,8 +144,13 @@ public:
         }
         rep.buy_and_hold_max_drawdown_pct = bnh_max_dd * 100.0;
 
+        const bool is_crypto = (data.instrument_type == "CRYPTOCURRENCY")
+            || (data.symbol.find("-USD") != std::string::npos)
+            || (data.symbol.find("-EUR") != std::string::npos);
+        const double base_alloc = is_crypto ? 0.35 : 0.70;
+
         // Causal Walk-Forward Loop (strictly zero look-ahead: slice [t - lookback .. t])
-        const size_t slice_cap = 90; // 90 causal bars are sufficient for 60d momentum, EWMA(0.94) vol, 22d VWAP & 14d ATR
+        const size_t slice_cap = 320; // 320 causal bars enable Empirical Bayes IC estimation (~250 trailing pairs) + VR(5)
         for (size_t t = window; t < eval_end; ++t) {
             double p_t = prices[t];
             if (p_t <= 0.0) continue;
@@ -155,6 +160,7 @@ public:
             sub.symbol = data.symbol;
             sub.currency_code = data.currency_code;
             sub.currency_display = rep.currency;
+            sub.instrument_type = data.instrument_type;
             sub.current_price = p_t;
             sub.is_live = data.is_live;
 
@@ -216,26 +222,28 @@ public:
             total_abs_error += std::abs((fc.target_price - p_actual) / p_actual) * 100.0;
             total_rw_abs_error += std::abs((p_t - p_actual) / p_actual) * 100.0;
 
-            // Realistic Next-Bar Execution Strategy with 10 bps One-Way Fee
-            bool want_long = (fc.quant_score >= 0.08);
-            bool want_exit = (fc.quant_score <= -0.05);
-
+            // Continuous Conviction-Weighted Execution with Rebalance Hysteresis & 10 bps One-Way Fee
+            const double desired_w = std::clamp(base_alloc + 1.50 * fc.quant_score, 0.0, 1.0);
+            const double delta_w = std::abs(desired_w - pos_weight);
             double fee_drag = 0.0;
-            if (want_long && !in_position) {
-                in_position = true;
-                fee_drag = kOneWayFee;
+            const bool entering_from_flat = (pos_weight == 0.0 && desired_w >= 0.22);
+            const bool exiting_to_flat = (pos_weight > 0.0 && desired_w <= 0.05);
+            if (entering_from_flat || exiting_to_flat || delta_w >= 0.22) {
+                fee_drag = delta_w * kOneWayFee;
                 capital *= (1.0 - fee_drag);
-                entry_capital = capital;
-                trades++;
-            } else if (want_exit && in_position) {
-                in_position = false;
-                fee_drag = kOneWayFee;
-                capital *= (1.0 - fee_drag);
-                if (capital > entry_capital) win_trades++;
+                if (!in_position && desired_w >= 0.22) {
+                    in_position = true;
+                    entry_capital = capital;
+                    trades++;
+                } else if (in_position && desired_w < 0.20) {
+                    in_position = false;
+                    if (capital > entry_capital) win_trades++;
+                }
+                pos_weight = desired_w;
             }
 
             double next_bar_ret = (prices[t + 1] - p_t) / p_t;
-            double net_daily_ret = in_position ? next_bar_ret : 0.0;
+            double net_daily_ret = pos_weight * next_bar_ret;
             // Include fee impact in daily strategy return series for honest Sharpe calculation
             double total_step_ret = (1.0 - fee_drag) * (1.0 + net_daily_ret) - 1.0;
             daily_strat_rets.push_back(total_step_ret);
@@ -264,11 +272,14 @@ public:
             }
         }
 
-        // Close any still-open trade at the end of the evaluation window (with exit fee)
-        if (in_position) {
-            capital *= (1.0 - kOneWayFee);
-            if (capital > entry_capital) win_trades++;
-            in_position = false;
+        // Close any still-open exposure at the end of the evaluation window (with exit fee)
+        if (pos_weight > 0.0) {
+            capital *= (1.0 - pos_weight * kOneWayFee);
+            if (in_position) {
+                if (capital > entry_capital) win_trades++;
+                in_position = false;
+            }
+            pos_weight = 0.0;
         }
 
         rep.total_predictions = total_preds;
@@ -342,6 +353,16 @@ public:
         std::cout << std::format("   {:<28}: {} Kayan Pencere  │  {} Bağımsız (Örtüşmeyen) Blok\n\n",
                                  I18n::tr("Örneklem Büyüklüğü", "Sample Size", "Stichprobenumfang"),
                                  rep.total_predictions, rep.non_overlapping_blocks);
+
+        if (rep.total_predictions == 0) {
+            std::cout << pal.red_rgb
+                      << I18n::tr("   ⚠ Yeterli tarihsel bar alınamadı (geçersiz/çevrimdışı sembol veya çok yeni halka arz); test çalıştırılamadı.\n",
+                                  "   ⚠ Insufficient historical bars (invalid/offline ticker or brand-new listing); walk-forward test skipped.\n",
+                                  "   ⚠ Nicht genügend historische Daten (ungültiges/offline Symbol oder Börsenneuling); Test übersprungen.\n")
+                      << pal.glow_rgb
+                      << "╚══════════════════════════════════════════════════════════════════════════════╝\n" << pal.reset_code;
+            return;
+        }
 
         std::cout << pal.glow_rgb
                   << I18n::tr("   1. İSTATİSTİKSEL İSABET & KALİBRASYON METRİKLERİ (NÖTR ŞİŞİRME YOK):\n",

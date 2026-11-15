@@ -18,6 +18,11 @@
 #include "forecast_backtest.hpp"
 #include "alpha_screener.hpp"
 #include "data_quality.hpp"
+#include "hft_lob_engine.hpp"
+#include "backtester.hpp"
+#include "cross_sectional_lab.hpp"
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <format>
 #include <cassert>
@@ -50,10 +55,17 @@ public:
         all_ok &= test_multicurrency_favok_fundamentals();
         all_ok &= test_data_quality_and_alerts();
         all_ok &= test_live_intraday_cache_and_yield_wiring();
+        all_ok &= test_silahian_hft_lob_rms_and_nash_mm();
+        all_ok &= test_silahian_ml_dpo_ior_and_heston_merton();
+        all_ok &= test_silahian_full_app_resilience_dupire_stress();
+        all_ok &= test_sticky_sentiment_and_event_shock();
+        all_ok &= test_cross_sectional_ic_portfolio_and_mcc();
+        all_ok &= test_fake_alpha_diagnostics_leakage_and_robustness();
+        all_ok &= test_dashboard_report_export_integrity();
 
         std::cout << "\n-------------------------------------------------------\n";
         if (all_ok) {
-            std::cout << "\033[32m[PASS] ALL 15 QUANT, MICROSTRUCTURE, FAVÖK & DATA QUALITY TESTS PASSED!\033[0m\n";
+            std::cout << "\033[32m[PASS] ALL 22 QUANT, CROSS-SECTIONAL, FAKE-ALPHA, STICKY-NLP, HFT/LOB & REPORT TESTS PASSED!\033[0m\n";
         } else {
             std::cout << "\033[31m[FAIL] SOME TESTS FAILED!\033[0m\n";
         }
@@ -348,10 +360,49 @@ private:
         ok &= check_cond(rep.in_band_coverage_pct >= 50.0 && rep.in_band_coverage_pct <= 82.0,
                          std::format("1-Sigma Band Calibration Coverage: {:.1f}% (Target ~68.3%, RW MAPE={:.2f}%, Model MAPE={:.2f}%)",
                                      rep.in_band_coverage_pct, rep.random_walk_mape_pct, rep.mean_absolute_error_pct));
-        ok &= check_cond(rep.mean_absolute_error_pct <= 8.0,
+        ok &= check_cond(rep.mean_absolute_error_pct <= 8.0 &&
+                         rep.mean_absolute_error_pct <= rep.random_walk_mape_pct + 0.15,
                          std::format("Active Conviction Accuracy: {:.1f}% ({} signals) | Block Accuracy: {:.1f}% (z={:+.2f})",
                                      rep.active_directional_accuracy_pct, rep.active_predictions,
                                      rep.non_overlapping_accuracy_pct, rep.binomial_z_stat));
+
+        // Deterministic synthetic oscillating market test: verify causal IC adapts to mean reversion offline
+        RealTimeAssetData mr_synth;
+        mr_synth.symbol = "SYNTH_MR";
+        mr_synth.currency_code = "USD";
+        mr_synth.is_live = true;
+        for (int i = 0; i < 240; ++i) {
+            double p = 100.0 * std::exp(0.06 * std::sin(2.0 * 3.14159265358979 * i / 14.0));
+            mr_synth.historical_prices.push_back(p);
+            mr_synth.historical_highs.push_back(p * 1.008);
+            mr_synth.historical_lows.push_back(p * 0.992);
+            mr_synth.historical_opens.push_back(p);
+            mr_synth.historical_volumes.push_back(1000000.0);
+        }
+        mr_synth.current_price = mr_synth.historical_prices.back();
+        auto mr_rep = ForecastBacktestEngine::evaluate_on_asset_data(mr_synth, 5, "1y");
+        ok &= check_cond(mr_rep.total_predictions >= 150 &&
+                         mr_rep.directional_accuracy_pct >= 60.0 &&
+                         mr_rep.mean_absolute_error_pct <= mr_rep.random_walk_mape_pct,
+                         std::format("Causal Bayesian IC learns synthetic cycle (Hit={:.1f}%, MAPE={:.2f}% <= RW {:.2f}%)",
+                                     mr_rep.directional_accuracy_pct, mr_rep.mean_absolute_error_pct, mr_rep.random_walk_mape_pct));
+
+        // Short-IPO & empty/invalid series graceful handling without NaN or zero-division
+        RealTimeAssetData ipo_short;
+        ipo_short.symbol = "NEWIPO.IS";
+        ipo_short.currency_code = "TRY";
+        ipo_short.is_live = true;
+        for (int i = 0; i < 36; ++i) ipo_short.historical_prices.push_back(50.0 + 0.4 * i);
+        ipo_short.current_price = ipo_short.historical_prices.back();
+        auto ipo_rep = ForecastBacktestEngine::evaluate_on_asset_data(ipo_short, 5, "2y");
+        RealTimeAssetData empty_sym;
+        empty_sym.symbol = "NONE";
+        auto empty_rep = ForecastBacktestEngine::evaluate_on_asset_data(empty_sym, 5, "2y");
+        ok &= check_cond(ipo_rep.total_predictions >= 10 &&
+                         std::isfinite(ipo_rep.mean_absolute_error_pct) &&
+                         empty_rep.total_predictions == 0,
+                         std::format("Short IPO (36 bars -> {} preds) & empty ticker edge cases handled cleanly",
+                                     ipo_rep.total_predictions));
 
         return ok;
     }
@@ -391,6 +442,77 @@ private:
                          std::format("True 22d Typical-Price VWAP != Spot verified on {}/{} assets", live_vwap_distinct, results.size()));
         ok &= check_cond(favok_populated >= 5 && multi_currency_favok_sane,
                          std::format("Live FAVÖK (EBITDA) & FX-aligned FD/FAVÖK verified on {} BIST corporates", favok_populated));
+
+        int ic_populated = 0;
+        for (const auto& c : results) {
+            if (c.predictability_samples >= 20 && std::isfinite(c.predictability_ic) &&
+                c.predictability_ic >= -1.0 && c.predictability_ic <= 1.0) {
+                ++ic_populated;
+            }
+        }
+        ok &= check_cond(ic_populated >= static_cast<int>(results.size() / 2),
+                         std::format("Causal Time-IC predictability computed on {}/{} live assets", ic_populated, results.size()));
+
+        // Deterministic offline verification of Sticky Event-Shock Veto + Time-IC
+        RealTimeAssetData synth;
+        synth.symbol = "TEST.IS";
+        synth.is_live = false;
+        constexpr int N_BARS = 78; // index 77 mod 16 = 13 -> oversold trough bouncing
+        synth.historical_prices.reserve(N_BARS);
+        synth.historical_highs.reserve(N_BARS);
+        synth.historical_lows.reserve(N_BARS);
+        synth.historical_volumes.reserve(N_BARS);
+        for (int i = 0; i < N_BARS; ++i) {
+            double px = 100.0 + 7.5 * std::sin(static_cast<double>(i) * 2.0 * 3.14159265358979 / 16.0);
+            synth.historical_prices.push_back(px);
+            synth.historical_highs.push_back(px * 1.015);
+            synth.historical_lows.push_back(px * 0.985);
+            double prev_px = (i > 0) ? synth.historical_prices[i - 1] : px;
+            synth.historical_volumes.push_back((px >= prev_px) ? 2000000.0 : 1200000.0);
+        }
+        synth.current_price = synth.historical_prices.back();
+        synth.vwap = 100.0;
+        synth.atr_14 = 2.2;
+        synth.annualized_volatility = 0.28;
+
+        FundamentalProfile empty_fund;
+        AssetSentimentProfile neutral_sent;
+        neutral_sent.has_live_news = true;
+        neutral_sent.sentiment_score = 0.05;
+        neutral_sent.sticky_sentiment_score = 0.05;
+        neutral_sent.sent_strength = 0.08;
+        neutral_sent.is_event_shock = false;
+
+        AssetSentimentProfile shock_sent;
+        shock_sent.has_live_news = true;
+        shock_sent.sentiment_score = -0.72;
+        shock_sent.sticky_sentiment_score = -0.78;
+        shock_sent.sent_strength = 0.85;
+        shock_sent.is_event_shock = true;
+
+        auto cand_neutral = QuantOpportunityScanner::evaluate_candidate(
+            "TEST.IS", "Test Holding A.S.", "Sanayi", "BIST", "TL",
+            synth, empty_fund, -2.0, &neutral_sent);
+        auto cand_shock = QuantOpportunityScanner::evaluate_candidate(
+            "TEST.IS", "Test Holding A.S.", "Sanayi", "BIST", "TL",
+            synth, empty_fund, -2.0, &shock_sent);
+
+        ok &= check_cond(
+            cand_neutral.predictability_samples >= 40 &&
+                cand_neutral.predictability_ic > 0.25 &&
+                cand_neutral.predictability_hit_rate > 0.55,
+            std::format("Mean-reverting series yields positive causal Time-IC={:+.3f}, Hit={:.1f}% (n={})",
+                        cand_neutral.predictability_ic,
+                        cand_neutral.predictability_hit_rate * 100.0,
+                        cand_neutral.predictability_samples));
+        ok &= check_cond(
+            cand_neutral.category != AlphaCategory::CrowdedTradeWarning &&
+                cand_shock.category == AlphaCategory::CrowdedTradeWarning &&
+                cand_shock.composite_alpha_score < cand_neutral.composite_alpha_score - 1.5 &&
+                cand_shock.target_price < cand_neutral.target_price,
+            std::format("Sticky Event-Shock Veto downgrades setup & cuts score ({:+.2f} -> {:+.2f}) and target ({:.2f} -> {:.2f})",
+                        cand_neutral.composite_alpha_score, cand_shock.composite_alpha_score,
+                        cand_neutral.target_price, cand_shock.target_price));
 
         return ok;
     }
@@ -475,11 +597,28 @@ private:
 
         // Genuine Turkish & English sentiment + negation flip
         double s_tr_pos = NewsSentimentEngine::score_headline("Şirket rekor net kâr ve güçlü büyüme açıkladı");
+        double s_tr_inf = NewsSentimentEngine::score_headline("ASELSAN yükselişi rekorunu kırdı ve yeni siparişleri açıkladı");
+        double s_tr_neg = NewsSentimentEngine::score_headline("Şirket zararını açıkladı ve hisseleri sert düştüğü için baskısı arttı");
         double s_neg_flip = NewsSentimentEngine::score_headline("No recession expected as economy remains stable");
+        double s_contrast = NewsSentimentEngine::score_headline("Company beats estimates, but weak guidance sparks selloff");
+        double s_scandal  = NewsSentimentEngine::score_headline("What the Nvidia scandal means after CEO resignation and espionage accusation");
+        double s_tr_scand = NewsSentimentEngine::score_headline("CEO casusluk skandalına karıştı, suçlamalar sonrası istifa ve soruşturma başladı");
+        double rel_nvda_on_aapl = NewsSentimentEngine::compute_headline_relevance_(
+            "5 big analyst AI moves: Nvidia hit with downgrades after Huang's exit", "AAPL", "Apple Inc.");
+        double rel_aapl_on_aapl = NewsSentimentEngine::compute_headline_relevance_(
+            "Evercore explains why Apple has the right assets to win", "AAPL", "Apple Inc.");
+
         ok &= check_cond(s_tr_pos > 0.35,
                          std::format("Turkish UTF-8 positive headline ('rekor net kâr ve güçlü büyüme') = {:+.2f}", s_tr_pos));
-        ok &= check_cond(s_neg_flip >= 0.0,
-                         std::format("Negation handling ('No recession expected') = {:+.2f} (>= 0.0)", s_neg_flip));
+        ok &= check_cond(s_tr_inf > 0.30 && s_tr_neg < -0.25,
+                         std::format("Turkish inflected stem polarity (pos={:+.2f}, neg={:+.2f})", s_tr_inf, s_tr_neg));
+        ok &= check_cond(s_scandal < -0.75 && s_tr_scand < -0.75,
+                         std::format("Corporate scandal / espionage / CEO resignation polarity (EN={:+.2f}, TR={:+.2f})", s_scandal, s_tr_scand));
+        ok &= check_cond(s_neg_flip >= 0.0 && s_contrast < -0.15,
+                         std::format("Negation & contrastive pivot ('No recession'={:+.2f}, 'but selloff'={:+.2f})", s_neg_flip, s_contrast));
+        ok &= check_cond(rel_nvda_on_aapl == 0.0 && rel_aapl_on_aapl == 1.0,
+                         std::format("Cross-ticker headline isolation verified (Nvidia->AAPL: {:.1f}, Apple->AAPL: {:.1f})",
+                                     rel_nvda_on_aapl, rel_aapl_on_aapl));
 
         return ok;
     }
@@ -780,6 +919,460 @@ private:
                          std::format("USD forecast carry wired to live Treasury yields (1% -> {:+.2f}%, 5.5% -> {:+.2f}%)",
                                      fc_low.expected_return_pct, fc_high.expected_return_pct));
 
+        return ok;
+    }
+
+    static bool test_silahian_hft_lob_rms_and_nash_mm() {
+        std::cout << "\n[TEST 16] Silahian Ch.2/3/6/7: SPSC Hub, O(1) Circular LOB vs Map LOB, RMS & Nash MM:\n";
+        bool ok = true;
+
+        // 1. Lock-Free SPSC Ring Buffer FIFO & Cache Alignment
+        static_assert(alignof(MarketTickMessage) == 64, "MarketTickMessage must be 64B cache-aligned");
+        SpscRingBuffer<MarketTickMessage, 64> rb;
+        ok &= check_cond(rb.empty() && rb.capacity() == 63, "SPSC RingBuffer starts empty with cap=63");
+
+        bool pushed_all = true;
+        for (uint64_t i = 1; i <= 63; ++i) {
+            pushed_all &= rb.try_push(MarketTickMessage{i, i, static_cast<int64_t>(i * 10), 100.0 + 0.01 * i, OrderSide::Buy, 0, 1});
+        }
+        bool rejected_full = !rb.try_push(MarketTickMessage{64, 64, 10, 100.0, OrderSide::Buy, 0, 1});
+        bool fifo_ok = true;
+        for (uint64_t i = 1; i <= 63; ++i) {
+            MarketTickMessage m;
+            if (!rb.try_pop(m) || m.seq_id != i) fifo_ok = false;
+        }
+        ok &= check_cond(pushed_all && rejected_full && fifo_ok && rb.empty(),
+                         "SPSC Lock-Free RingBuffer preserves strict FIFO order & handles back-pressure");
+
+        // 2. O(1) CircularArrayLOB exact parity against std::map MapLimitOrderBook
+        CircularArrayLOB circ_lob(90.0, 110.0, 0.05, 1024);
+        MapLimitOrderBook map_lob(0.05);
+
+        struct Op { uint8_t kind; uint64_t id; OrderSide side; double px; int64_t qty; };
+        std::vector<Op> ops = {
+            {0, 1, OrderSide::Buy,  99.90, 200},
+            {0, 2, OrderSide::Buy,  99.95, 150},
+            {0, 3, OrderSide::Buy,  99.95, 100},
+            {0, 4, OrderSide::Sell, 100.05, 300},
+            {0, 5, OrderSide::Sell, 100.10, 250},
+            {1, 2, OrderSide::Buy,  0.0,   400}, // update order 2 qty 150 -> 400
+            {2, 2, OrderSide::Buy,  0.0,   0},   // delete order 2 -> level 99.95 drops from 500 to 100
+            {2, 3, OrderSide::Buy,  0.0,   0},   // delete order 3 -> best bid must scan down to 99.90!
+            {2, 4, OrderSide::Sell, 0.0,   0},   // delete best ask 100.05 -> best ask must scan up to 100.10!
+            {0, 6, OrderSide::Sell, 100.00, 180} // new tighter best ask
+        };
+        for (const auto& op : ops) {
+            if (op.kind == 0) {
+                circ_lob.add_order(op.id, op.side, op.px, op.qty);
+                map_lob.add_order(op.id, op.side, op.px, op.qty);
+            } else if (op.kind == 1) {
+                circ_lob.update_order(op.id, op.qty);
+                map_lob.update_order(op.id, op.qty);
+            } else {
+                circ_lob.delete_order(op.id);
+                map_lob.delete_order(op.id);
+            }
+        }
+        auto cb = circ_lob.get_best_bid(), mb = map_lob.get_best_bid();
+        auto ca = circ_lob.get_best_offer(), ma = map_lob.get_best_offer();
+        ok &= check_close(cb.price, mb.price, 1e-6, "CircularLOB best bid matches MapLOB after deletes");
+        ok &= check_close(ca.price, ma.price, 1e-6, "CircularLOB best ask matches MapLOB after updates");
+        ok &= check_cond(cb.quantity == mb.quantity && ca.quantity == ma.quantity,
+                         std::format("LOB L1 quantities match exactly (Bid {} vs {}, Ask {} vs {})",
+                                     cb.quantity, mb.quantity, ca.quantity, ma.quantity));
+
+        auto m_an = circ_lob.analytics();
+        ok &= check_cond(m_an.spread_bps > 0.0 && m_an.micro_price > cb.price && m_an.micro_price < ca.price &&
+                         m_an.l1_imbalance >= -1.0 && m_an.l1_imbalance <= 1.0,
+                         std::format("LOB microstructure metrics coherent (micro={:.4f}, spread={:.1f}bps)",
+                                     m_an.micro_price, m_an.spread_bps));
+
+        // 3. Pre-Trade Institutional Risk Management System (RMS)
+        PreTradeRiskConfig rcfg;
+        rcfg.max_order_qty = 1000;
+        rcfg.max_order_notional = 100000.0;
+        rcfg.max_price_collar_pct = 5.0;
+        PreTradeRiskEngine rms(rcfg);
+        auto r1 = rms.validate_order(OrderSide::Buy, 100.0, 500, 100.0);
+        auto r2 = rms.validate_order(OrderSide::Buy, 100.0, 1500, 100.0);
+        auto r3 = rms.validate_order(OrderSide::Buy, 112.0, 100, 100.0);
+        rms.set_pnl(-30000.0);
+        auto r4 = rms.validate_order(OrderSide::Sell, 100.0, 100, 100.0);
+        ok &= check_cond(r1.approved && r2.reason == RiskRejectReason::MaxOrderQtyExceeded &&
+                         r3.reason == RiskRejectReason::FatFingerCollarExceeded &&
+                         r4.reason == RiskRejectReason::KillSwitchEngaged,
+                         "Pre-Trade RMS enforces qty limit, fat-finger collar, and daily drawdown kill-switch");
+
+        // 4. Game-Theoretic Nash Quoter (inventory skew + MM session) + Ch 6 CPU Bench
+        auto q_long = GameTheoreticQuoter::compute_nash_quotes(100.0, 100.0, 0.0, +15, 0.25);
+        auto q_short = GameTheoreticQuoter::compute_nash_quotes(100.0, 100.0, 0.0, -15, 0.25);
+        auto mm_sess = GameTheoreticQuoter::run_market_making_session(100.0, 0.25, 150, 77);
+        ok &= check_cond(q_long.reservation_price < q_short.reservation_price &&
+                         q_long.optimal_bid < q_long.reservation_price && q_long.reservation_price < q_long.optimal_ask &&
+                         mm_sess.simulated_fills > 0 && std::isfinite(mm_sess.simulated_mm_pnl),
+                         std::format("Ch.7 Nash Quoter skews inventory cleanly (fills={}, PnL={:+.2f})",
+                                     mm_sess.simulated_fills, mm_sess.simulated_mm_pnl));
+
+        auto bench = LowLatencyBenchmarkSuite::run_on_machine(4000, 64);
+        ok &= check_cond(bench.lob_circular_ms > 0.0 && bench.cache_padded_ms > 0.0 && bench.row_major_tiled_ms > 0.0,
+                         std::format("Ch.6 Empirical Benchmarks measured live (LOB {:.2f}x, CachePad {:.2f}x)",
+                                     bench.lob_speedup, bench.false_sharing_speedup));
+        return ok;
+    }
+
+    static bool test_silahian_ml_dpo_ior_and_heston_merton() {
+        std::cout << "\n[TEST 17] Silahian Ch.4/7: DPO (PSO & RL), IOR Router, RL/OFI Backtests, Heston & Merton:\n";
+        bool ok = true;
+
+        // 1. Dynamic Portfolio Optimization (PSO + Causal RL)
+        Eigen::MatrixXd rets(80, 4);
+        std::mt19937_64 rng(99ULL);
+        std::normal_distribution<double> nd(0.0, 1.0);
+        for (int r = 0; r < 80; ++r) {
+            rets(r, 0) = 0.0012 + 0.008 * nd(rng); // High Sharpe asset
+            rets(r, 1) = 0.0005 + 0.011 * nd(rng);
+            rets(r, 2) = 0.0002 + 0.007 * nd(rng);
+            rets(r, 3) = -0.0010 + 0.025 * nd(rng); // High vol negative drift
+        }
+        auto dpo = PortfolioLinearAlgebra::optimize_dynamic_portfolio(rets, 0.03, 0.65, 42);
+        ok &= check_close(dpo.pso_weights.sum(), 1.0, 1e-6, "DPO PSO weights satisfy budget sum(w) == 1.0");
+        ok &= check_close(dpo.rl_weights.sum(), 1.0, 1e-6, "DPO RL weights satisfy budget sum(w) == 1.0");
+        ok &= check_cond(dpo.pso_weights.minCoeff() >= -1e-9 && dpo.rl_weights.minCoeff() >= -1e-9 &&
+                         dpo.pso_weights(0) > dpo.pso_weights(3),
+                         std::format("DPO PSO & RL favor quality asset over negative-drift high-vol (w0={:.2f} vs w3={:.2f}, Sharpe={:.2f})",
+                                     dpo.pso_weights(0), dpo.pso_weights(3), dpo.pso_sharpe));
+
+        // 2. Intelligent Order Router (IOR) RL Execution
+        IntelligentOrderRouter ior;
+        auto ior_res = ior.simulate_parent_order(100.0, 0.25, 14.0, 10000, 260, 42);
+        ok &= check_cond(ior_res.ior_filled_shares > 5000 && std::isfinite(ior_res.ior_vwap) &&
+                         ior_res.ior_shortfall_bps < ior_res.naive_shortfall_bps + 2.5,
+                         std::format("IOR smart router executed cleanly (Shortfall {:.2f} vs Naive {:.2f} bps)",
+                                     ior_res.ior_shortfall_bps, ior_res.naive_shortfall_bps));
+
+        // 3. Causal Backtests: RLDynamicPortfolio & OrderFlowImbalance
+        std::vector<double> closes, highs, lows, vols;
+        double px = 100.0;
+        for (int i = 0; i < 120; ++i) {
+            const double cyc = std::sin(i * 0.25);
+            px *= std::exp(0.0015 + 0.008 * cyc);
+            closes.push_back(px);
+            highs.push_back(px * (cyc >= 0.0 ? 1.003 : 1.012));
+            lows.push_back(px * (cyc >= 0.0 ? 0.988 : 0.997));
+            vols.push_back(1000000.0 + (i % 7) * 150000.0);
+        }
+        auto bt_rl = BacktestEngine::run_ohlcv(closes, highs, lows, vols, StrategyType::RLDynamicPortfolio);
+        auto bt_ofi = BacktestEngine::run_ohlcv(closes, highs, lows, vols, StrategyType::OrderFlowImbalance);
+        ok &= check_cond(std::isfinite(bt_rl.total_return_pct) && bt_rl.max_drawdown_pct >= 0.0 &&
+                         std::isfinite(bt_ofi.total_return_pct) && bt_ofi.max_drawdown_pct >= 0.0,
+                         std::format("Causal RL & OFI Backtests ran cleanly (RL {:+.1f}%, OFI {:+.1f}%)",
+                                     bt_rl.total_return_pct, bt_ofi.total_return_pct));
+
+        // 4. Heston Stochastic Volatility (xi->0 -> BS) & Merton Jump-Diffusion (lambda->0 -> BS & fat-tail check)
+        const double spot = 100.0, K_atm = 100.0, T = 0.5, r = 0.05, sigma = 0.20;
+        BlackScholes bs_atm{K_atm, spot, T, PayoffType::Call, r, 0.0};
+        const double bs_ref = bs_atm(sigma);
+
+        OptionInfo opt_atm{std::make_unique<CallPayoff>(K_atm), T};
+        MCOptionValuation mc{std::move(opt_atm), 48, sigma, r, 0.0};
+
+        MCOptionValuation::HestonParams hp_zero{sigma * sigma, 2.0, sigma * sigma, 0.0, 0.0};
+        double h_lim = mc.calc_heston_mc_price_par(spot, hp_zero, 50000, 123);
+        ok &= check_close(h_lim, bs_ref, 0.25, "Heston MC (xi=0) converges to Black-Scholes ATM Call");
+
+        MCOptionValuation::MertonJumpParams jp_zero{0.0, 0.0, 0.0};
+        double m_lim = mc.calc_merton_jump_price_par(spot, jp_zero, 50000, 456);
+        ok &= check_close(m_lim, bs_ref, 0.25, "Merton Jump MC (lambda=0) converges to Black-Scholes ATM Call");
+
+        // OTM Put crash-tail premium test under Merton Negative Jumps
+        BlackScholes bs_otm_put{80.0, spot, T, PayoffType::Put, r, 0.0};
+        double bs_put_ref = bs_otm_put(sigma);
+        OptionInfo opt_otm_put{std::make_unique<PutPayoff>(80.0), T};
+        MCOptionValuation mc_put{std::move(opt_otm_put), 48, sigma, r, 0.0};
+        MCOptionValuation::MertonJumpParams jp_crash{1.5, -0.15, 0.20};
+        double merton_crash_put = mc_put.calc_merton_jump_price_par(spot, jp_crash, 40000, 789);
+        ok &= check_cond(merton_crash_put > bs_put_ref + 0.5,
+                         std::format("Merton Jump prices crash fat-tail OTM Put higher than BS ({:.4f} vs BS {:.4f})",
+                                     merton_crash_put, bs_put_ref));
+
+        return ok;
+    }
+
+    static bool test_silahian_full_app_resilience_dupire_stress() {
+        std::cout << "\n[TEST 18] Silahian Full-App Ch.3-7: Dupire Local Vol, Circuit Breaker/RateLimiter/P95, Tail Forecast, Stress & Net Pairs:\n";
+        bool ok = true;
+
+        // 1. Ch.7 Dupire Local Volatility (flat surface -> BS; negative skew raises OTM Put)
+        const double spot = 100.0, K_atm = 100.0, T = 0.5, r = 0.05, sigma = 0.20;
+        BlackScholes bs_atm{K_atm, spot, T, PayoffType::Call, r, 0.0};
+        OptionInfo opt_c{std::make_unique<CallPayoff>(K_atm), T};
+        MCOptionValuation mc_c{std::move(opt_c), 48, sigma, r, 0.0};
+        MCOptionValuation::DupireSurfaceParams dp_flat{sigma, 0.0, 0.0, 0.0};
+        double dup_flat = mc_c.calc_dupire_local_vol_price_par(spot, dp_flat, 50000, 321);
+        ok &= check_close(dup_flat, bs_atm(sigma), 0.25, "Dupire Local Vol (flat smile/skew) converges to Black-Scholes ATM Call");
+
+        BlackScholes bs_otm_put{85.0, spot, T, PayoffType::Put, r, 0.0};
+        OptionInfo opt_p{std::make_unique<PutPayoff>(85.0), T};
+        MCOptionValuation mc_p{std::move(opt_p), 48, sigma, r, 0.0};
+        MCOptionValuation::DupireSurfaceParams dp_skew{sigma, -0.35, 0.25, 0.04};
+        double dup_skew_put = mc_p.calc_dupire_local_vol_price_par(spot, dp_skew, 40000, 654);
+        ok &= check_cond(dup_skew_put > bs_otm_put(sigma) + 0.15,
+                         std::format("Dupire negative skew raises OTM Put tail premium ({:.4f} vs BS {:.4f})",
+                                     dup_skew_put, bs_otm_put(sigma)));
+
+        // 2. Ch.5 TokenBucketRateLimiter + EndpointCircuitBreaker + Latency P50/P95/P99
+        TokenBucketRateLimiter limiter(50.0, 2.0);
+        ok &= check_cond(limiter.try_acquire() && limiter.try_acquire() && !limiter.try_acquire(),
+                         "TokenBucketRateLimiter drains burst tokens accurately and throttles excess");
+
+        EndpointCircuitBreaker cb(3, std::chrono::seconds(1));
+        ok &= check_cond(cb.state() == CircuitState::Closed && cb.allow_request(), "Circuit starts Closed");
+        cb.record_failure();
+        cb.record_failure();
+        bool tripped = cb.record_failure();
+        ok &= check_cond(tripped && cb.state() == CircuitState::Open && !cb.allow_request(),
+                         "EndpointCircuitBreaker trips Open after failure threshold and fails fast");
+        cb.reset();
+        cb.record_success();
+        ok &= check_cond(cb.state() == CircuitState::Closed && cb.consecutive_failures() == 0,
+                         "EndpointCircuitBreaker recovers cleanly to Closed");
+
+        DataQualityDashboard::reset();
+        DataQualityTelemetry::record_fetch("Yahoo v8 Chart", "ep1", true, std::chrono::milliseconds(20), false, "", 200);
+        DataQualityTelemetry::record_fetch("Yahoo v8 Chart", "ep1", true, std::chrono::milliseconds(40), false, "", 200);
+        DataQualityTelemetry::record_fetch("Yahoo v8 Chart", "ep1", true, std::chrono::milliseconds(60), false, "", 200);
+        DataQualityTelemetry::record_fetch("Yahoo v8 Chart", "ep1", true, std::chrono::milliseconds(300), false, "", 200);
+        auto atom = DataQualityTelemetry::atomic_snapshot();
+        DataSourceMetrics dm;
+        dm.latency_samples_ms = {10, 20, 30, 40, 50, 60, 70, 80, 90, 200};
+        ok &= check_cond(atom.total_requests == 4 && atom.successful_requests == 4 &&
+                         dm.p50_latency_ms() == 50 && dm.p95_latency_ms() == 200,
+                         std::format("Latency SLO & Atomic counters exact (P50={}ms, P95={}ms, total={})",
+                                     dm.p50_latency_ms(), dm.p95_latency_ms(), atom.total_requests));
+        DataQualityDashboard::reset();
+
+        // 3. Ch.4/7 Asymmetric Tail Forecast Cone & Cornish-Fisher VaR/CVaR
+        RealTimeAssetData skew_asset;
+        skew_asset.symbol = "SKEW_TEST";
+        skew_asset.currency_code = "USD";
+        skew_asset.currency_display = "$";
+        skew_asset.is_live = true;
+        double px = 100.0;
+        for (int i = 0; i < 90; ++i) {
+            double r_day = (i % 15 == 14) ? -0.055 : 0.0045;
+            px *= std::exp(r_day);
+            skew_asset.historical_prices.push_back(px);
+            skew_asset.historical_highs.push_back(px * 1.006);
+            skew_asset.historical_lows.push_back(px * 0.992);
+            skew_asset.historical_volumes.push_back(2500000.0);
+        }
+        skew_asset.current_price = px;
+        skew_asset.annualized_volatility = 0.28;
+        auto fc_skew = QuantForecastEngine::forecast_for_trading_days(skew_asset, 21);
+        ok &= check_cond(fc_skew.downside_tail_mult > 1.0 &&
+                         fc_skew.var_95_pct > 2.0 &&
+                         fc_skew.cvar_95_pct >= fc_skew.var_95_pct &&
+                         fc_skew.regime_confidence >= 0.65 && fc_skew.regime_confidence <= 1.0,
+                         std::format("Asymmetric Forecast Cone widens bear tail ({:.3f}x, VaR95=-{:.1f}%, CVaR95=-{:.1f}%)",
+                                     fc_skew.downside_tail_mult, fc_skew.var_95_pct, fc_skew.cvar_95_pct));
+
+        // 4. Ch.4 Stress Scenarios (Historical VaR/CVaR, -15% Crash, 2x Liquidity Freeze) & Pairs Net Edge
+        std::vector<double> sample_rets;
+        for (int i = 0; i < 100; ++i) sample_rets.push_back((i % 10 == 0) ? -0.032 : 0.0025);
+        auto sr = DrawdownRiskEngine::run_stress_scenarios(sample_rets, 100000.0, 15.0);
+        ok &= check_cond(sr.hist_var_95 > 0.0 && sr.cvar_95 >= sr.hist_var_95 &&
+                         std::abs(sr.market_crash_15pct_loss - 15000.0) < 1e-6 &&
+                         sr.vol_2x_liquidity_freeze_loss > sr.cvar_95,
+                         std::format("Stress scenarios valid (VaR95={:.0f}, CVaR95={:.0f}, Freeze={:.0f})",
+                                     sr.hist_var_95, sr.cvar_95, sr.vol_2x_liquidity_freeze_loss));
+
+        std::vector<double> pa, pb;
+        for (int i = 0; i < 60; ++i) {
+            pb.push_back(100.0 + i * 0.2);
+            pa.push_back(2.0 * pb.back() + ((i == 59) ? -14.0 : std::sin(i * 0.5)));
+        }
+        auto pair_res = PairsTradingEngine::analyze("A_TST", "B_TST", pa, pb);
+        ok &= check_cond(std::isfinite(pair_res.net_edge_zscore) &&
+                         std::abs(pair_res.net_edge_zscore) <= std::abs(pair_res.current_zscore) + 1e-9 &&
+                         !pair_res.execution_urgency.empty(),
+                         std::format("Pairs Net-of-Cost Edge computed (Z={:+.2f}, NetZ={:+.2f}, {})",
+                                     pair_res.current_zscore, pair_res.net_edge_zscore, pair_res.execution_urgency));
+
+        return ok;
+    }
+
+    static bool test_sticky_sentiment_and_event_shock() {
+        std::cout << "\n[TEST 19] Sticky 2-Stream Sentiment Memory, sent_strength & Event-Shock Damping:\n";
+        bool ok = true;
+
+        const int64_t day0 = 20500LL * 86400LL;
+        std::vector<StickyHeadlineObs> scandal_plus_fluff = {
+            {day0 + 3600, -0.85, 1.0},
+            {day0 + 7200, -0.78, 1.0},
+            {day0 + 2 * 86400 + 3600, 0.00, 1.0},
+            {day0 + 2 * 86400 + 7200, 0.00, 1.0}
+        };
+        auto st = NewsSentimentEngine::compute_sticky_sentiment(scandal_plus_fluff, day0 + 2 * 86400 + 10000);
+        ok &= check_cond(st.sticky_score <= -0.50 && st.negative_state <= -0.50 && st.is_event_shock &&
+                         st.count_log > 1.5 && st.strength <= -0.80 && st.dispersion > 0.35,
+                         std::format("Sticky memory preserves t-2 scandal across neutral weekend (sticky={:+.3f}, strength={:+.3f}, disp={:.3f})",
+                                     st.sticky_score, st.strength, st.dispersion));
+
+        // Verify event-shock profile meaningfully shifts forecast compared to neutral news
+        auto syn = CrossSectionalBacktestEngine::make_synthetic_asset_("NVDA_TST", 120, 777, 0.001, 0.02);
+        AssetSentimentProfile prof;
+        prof.has_live_news = true;
+        prof.sticky_sentiment_score = st.sticky_score;
+        prof.sent_count_log = st.count_log;
+        prof.sent_strength = st.strength;
+        prof.sent_dispersion = st.dispersion;
+        prof.is_event_shock = true;
+        prof.sentiment_score = st.sticky_score;
+
+        auto fc_neutral = QuantForecastEngine::forecast_for_trading_days(syn, 5, 0.0, false);
+        auto fc_shock   = QuantForecastEngine::forecast_for_trading_days(syn, 5, prof.sentiment_score, true, nullptr, "", 0, nullptr, &prof);
+        ok &= check_cond(fc_shock.expected_return_pct < fc_neutral.expected_return_pct - 0.35,
+                         std::format("Event-shock dampens 5d target ({:+.2f}% vs neutral {:+.2f}%)",
+                                     fc_shock.expected_return_pct, fc_neutral.expected_return_pct));
+
+        return ok;
+    }
+
+    static bool test_cross_sectional_ic_portfolio_and_mcc() {
+        std::cout << "\n[TEST 20] Cross-Sectional Portfolio Engine, Spearman CS-IC, Q-Spread, MCC & ETF Hygiene:\n";
+        bool ok = true;
+
+        // 1. Spearman & Classification Metrics (Accuracy, Zero-Rule Lift, MCC, Macro-F1)
+        std::vector<double> rx = {1.0, 2.0, 3.0, 4.0, 5.0};
+        std::vector<double> ry = {10.0, 20.0, 30.0, 40.0, 50.0};
+        double sp = CrossSectionalBacktestEngine::spearman_rank_ic(rx, ry);
+        ok &= check_close(sp, 1.0, 1e-9, "Spearman monotone Rank IC == 1.0");
+
+        std::vector<int> yt = {1, 1, 1, 0, -1, -1};
+        std::vector<int> yp = {1, 1, 0, 0, -1, -1};
+        auto cm = CrossSectionalBacktestEngine::compute_classification_metrics(yt, yp);
+        ok &= check_cond(std::abs(cm.accuracy - (5.0 / 6.0)) < 1e-6 &&
+                         std::abs(cm.zero_rule - 0.5) < 1e-6 &&
+                         std::abs(cm.lift - (5.0 / 6.0 - 0.5)) < 1e-6 &&
+                         cm.mcc > 0.70 && cm.f1_macro > 0.75,
+                         std::format("Multi-class metrics exact (Acc={:.3f}, Lift={:+.3f}, MCC={:.3f}, F1={:.3f})",
+                                     cm.accuracy, cm.lift, cm.mcc, cm.f1_macro));
+
+        // 2. Multi-Asset Universe with injected ETF (must be filtered by ETF hygiene!)
+        std::vector<RealTimeAssetData> assets;
+        RealTimeAssetData etf = CrossSectionalBacktestEngine::make_synthetic_asset_("SPY", 130, 10, 0.0004, 0.01);
+        etf.instrument_type = "ETF";
+        assets.push_back(etf);
+        for (int i = 0; i < 8; ++i) {
+            assets.push_back(CrossSectionalBacktestEngine::make_synthetic_asset_(
+                std::format("EQ{}.TST", i + 1), 130, 100ULL + static_cast<uint64_t>(i) * 17ULL,
+                0.0003 * (i % 3 == 0 ? 1.5 : 0.8), 0.012 + 0.002 * i));
+        }
+        CrossSectionalConfig cfg;
+        cfg.region = "SYN";
+        cfg.horizon_days = 5;
+        cfg.rebalance_days = 5;
+        cfg.top_n = 3;
+        cfg.warmup_bars = 65;
+        cfg.monte_carlo_trials = 6;
+
+        auto rep = CrossSectionalBacktestEngine::run_backtest(assets, cfg);
+        ok &= check_cond(rep.valid && rep.excluded_etf_count == 1 && rep.universe_size == 8 &&
+                         rep.evaluated_days >= 30 && rep.strategies.size() == 9 &&
+                         rep.per_stock.size() == 8 && rep.per_fold.size() >= 4 &&
+                         !rep.daily_ic_series.empty() && !rep.topn_holdings.empty(),
+                         std::format("CS-Backtest valid (N=8 eq, excl={}, days={}, strategies={}, folds={})",
+                                     rep.excluded_etf_count, rep.evaluated_days, rep.strategies.size(), rep.per_fold.size()));
+
+        return ok;
+    }
+
+    static bool test_fake_alpha_diagnostics_leakage_and_robustness() {
+        std::cout << "\n[TEST 21] Fake-Alpha Diagnostics, Look-Ahead Leakage Seal, Timing & Robustness:\n";
+        bool ok = true;
+
+        auto syn = CrossSectionalBacktestEngine::make_synthetic_asset_("LEAK_AUD", 120, 505, 0.0004, 0.015);
+        auto audit = CrossSectionalBacktestEngine::verify_feature_causality(syn, 5, 14);
+        ok &= check_cond(audit.passed && audit.max_feature_diff < 1e-12 && audit.max_forecast_diff < 1e-12,
+                         std::format("Zero Look-Ahead Leakage verified ({})", audit.detail));
+
+        auto diag = CrossSectionalBacktestEngine::run_diagnostic_sanity_checks(&syn);
+        ok &= check_cond(diag.lookahead_audit.passed && diag.synthetic_overfit_passed && diag.temporal_sentiment_var_passed &&
+                         diag.signal_quality.pearson_r > 0.15 && diag.signal_quality.p_value < 0.05,
+                         std::format("Pre-Deployment Sanity Suite passed (OverfitAcc={:.1f}%, SentStd={:.3f}, r={:+.3f}, p={:.4f})",
+                                     diag.synthetic_overfit_dir_acc * 100.0, diag.temporal_sentiment_std,
+                                     diag.signal_quality.pearson_r, diag.signal_quality.p_value));
+
+        // Verify Vol-Bias, High-Vol Pool IC, Timing Alpha & Ex-Top3/Ex-Best5 Robustness compute cleanly
+        std::vector<RealTimeAssetData> mix;
+        for (int i = 0; i < 6; ++i) {
+            mix.push_back(CrossSectionalBacktestEngine::make_synthetic_asset_(
+                std::format("FA{}.TST", i + 1), 120, 900ULL + static_cast<uint64_t>(i) * 31ULL,
+                0.0002, 0.010 + 0.003 * i));
+        }
+        CrossSectionalConfig cfg;
+        cfg.region = "SYN_FA";
+        cfg.horizon_days = 5;
+        cfg.top_n = 2;
+        cfg.monte_carlo_trials = 6;
+        auto rep = CrossSectionalBacktestEngine::run_backtest(mix, cfg);
+        ok &= check_cond(rep.valid &&
+                         std::isfinite(rep.skill.excess_sharpe_vs_vol) &&
+                         std::isfinite(rep.skill.excess_sharpe_vs_shuffled) &&
+                         std::isfinite(rep.skill.high_vol_pool_ic) &&
+                         std::isfinite(rep.skill.timing_alpha_pct) &&
+                         std::isfinite(rep.skill.sharpe_ex_top3_stocks) &&
+                         std::isfinite(rep.skill.sharpe_ex_best5_days) &&
+                         !rep.skill.verdict.empty(),
+                         std::format("Fake-Alpha & Robustness computed (ΔSharpe_Vol={:+.2f}, Timing={:+.1f}%, Verdict='{}')",
+                                     rep.skill.excess_sharpe_vs_vol, rep.skill.timing_alpha_pct, rep.skill.verdict));
+
+        return ok;
+    }
+
+    static bool test_dashboard_report_export_integrity() {
+        std::cout << "\n[TEST 22] Dashboard Standard CSV/JSON + OHLCV Export Contract Verification:\n";
+        bool ok = true;
+        namespace fs = std::filesystem;
+
+        std::vector<RealTimeAssetData> assets;
+        for (int i = 0; i < 6; ++i) {
+            assets.push_back(CrossSectionalBacktestEngine::make_synthetic_asset_(
+                std::format("RPT{}.TST", i + 1), 115, 300ULL + static_cast<uint64_t>(i) * 19ULL,
+                0.0005, 0.014));
+        }
+        CrossSectionalConfig cfg;
+        cfg.region = "TEST";
+        cfg.experiment_name = "_unit_test_dashboard_export";
+        cfg.horizon_days = 5;
+        cfg.top_n = 2;
+        cfg.monte_carlo_trials = 4;
+        cfg.reports_root = "reports";
+
+        auto rep = CrossSectionalBacktestEngine::run_backtest(assets, cfg);
+        std::string dir = CrossSectionalBacktestEngine::export_report(rep, &assets);
+        fs::path root(dir);
+
+        const std::vector<std::string> expected_files = {
+            "config.json", "summary.csv", "per_fold_results.csv",
+            "per_stock_results.csv", "cross_sectional_ic.csv",
+            "backtest_results.csv", "QuantForecast Top-2_trades.csv", "QuantForecast Top-2_holdings.csv"
+        };
+        bool all_files = !dir.empty() && fs::exists(root);
+        for (const auto& fn : expected_files) {
+            fs::path p = root / fn;
+            if (!fs::exists(p) || fs::file_size(p) < 20) all_files = false;
+        }
+        bool ohlcv_ok = fs::exists(fs::path("reports") / "ohlcv" / "RPT1.TST.json");
+        ok &= check_cond(all_files && ohlcv_ok,
+                         std::format("All 8 CSV/JSON report artifacts & local OHLCV JSON exported ({})", dir));
+
+        // Clean up temporary test artifacts cleanly
+        std::error_code ec;
+        fs::remove_all(root, ec);
+        for (int i = 0; i < 6; ++i) {
+            fs::remove(fs::path("reports") / "ohlcv" / std::format("RPT{}.TST.json", i + 1), ec);
+        }
         return ok;
     }
 };

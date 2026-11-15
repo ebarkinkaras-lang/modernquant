@@ -98,9 +98,9 @@ public:
     }
 
     static std::string status_sources() {
-        return tr("Kaynaklar: Daniel Hanson (Modern C++) • Jason Strimpel • Yves Hilpisch",
-                  "Sources: Daniel Hanson (Modern C++) • Jason Strimpel • Yves Hilpisch",
-                  "Quellen: Daniel Hanson (Modern C++) • Jason Strimpel • Yves Hilpisch");
+        return tr("Kaynaklar: Daniel Hanson • Ariel Silahian (HFT C++) • J. Strimpel • Y. Hilpisch",
+                  "Sources: Daniel Hanson • Ariel Silahian (HFT C++) • J. Strimpel • Y. Hilpisch",
+                  "Quellen: Daniel Hanson • Ariel Silahian (HFT C++) • J. Strimpel • Y. Hilpisch");
     }
 
     static std::string status_standards() {

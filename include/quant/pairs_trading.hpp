@@ -21,6 +21,9 @@ struct PairsAnalysisResult {
     double spread_std{0.0};
     double current_zscore{0.0};
     double half_life_days{0.0};
+    double est_roundtrip_cost_pct{0.20}; // Silahian Ch.4/7 IOR gidiş-dönüş işlem/slippage maliyeti (%)
+    double net_edge_zscore{0.0};        // Maliyet düşülmüş net Z-Score fırsatı
+    std::string execution_urgency;      // Oyun teorisi & half-life bazlı IOR icra hızı
     std::string signal; // "LONG SPREAD (BUY A / SELL B)", "SHORT SPREAD", "NEUTRAL"
 };
 
@@ -106,9 +109,29 @@ public:
             res.half_life_days = 999.0; // Non-mean reverting
         }
 
-        if (res.current_zscore <= -2.0) {
+        // Silahian (Packt, 2024) Ch.4/7: Execution-Cost Hurdle (IOR round-trip bps) & Game-Theoretic Urgency
+        const double gross_leg = std::max(1.0, std::abs(prices_a.back()) + std::abs(res.hedge_ratio * prices_b.back()));
+        res.est_roundtrip_cost_pct = 0.20; // 20 bps round-trip (commission + bid/ask + impact across both legs)
+        const double dollar_cost_hurdle = gross_leg * (res.est_roundtrip_cost_pct / 100.0);
+        const double cost_z_hurdle = (res.spread_std > 1e-9) ? (dollar_cost_hurdle / res.spread_std) : 0.0;
+        if (std::abs(res.current_zscore) > cost_z_hurdle) {
+            res.net_edge_zscore = (res.current_zscore >= 0.0)
+                ? (res.current_zscore - cost_z_hurdle)
+                : (res.current_zscore + cost_z_hurdle);
+        } else {
+            res.net_edge_zscore = 0.0;
+        }
+        if (res.half_life_days <= 8.0 && std::abs(res.net_edge_zscore) >= 1.8) {
+            res.execution_urgency = "AGGRESSIVE IOR (Fast OU Half-Life & Strong Net Edge)";
+        } else if (std::abs(res.net_edge_zscore) >= 1.5) {
+            res.execution_urgency = "PASSIVE NASH TWAP (Capture Spread Mean-Reversion)";
+        } else {
+            res.execution_urgency = "WAIT / COST-FILTERED (Insufficient Spread-to-Friction Ratio)";
+        }
+
+        if (res.current_zscore <= -2.0 && std::abs(res.net_edge_zscore) >= 1.25) {
             res.signal = "LONG SPREAD [BUY " + asset_a + " / SELL " + asset_b + "]";
-        } else if (res.current_zscore >= 2.0) {
+        } else if (res.current_zscore >= 2.0 && std::abs(res.net_edge_zscore) >= 1.25) {
             res.signal = "SHORT SPREAD [SELL " + asset_a + " / BUY " + asset_b + "]";
         } else if (std::abs(res.current_zscore) <= 0.5) {
             res.signal = "EXIT / CLOSE POSITION [SPREAD AT MEAN]";
