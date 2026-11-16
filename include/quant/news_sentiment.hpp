@@ -193,18 +193,37 @@ public:
 
         static const std::unordered_set<std::string> severe_negative_trigrams = {
             "price target cut", "price target lowered", "cut price target", "slashes price target",
-            "cuts full year", "etf net outflow", "is in crisis", "not düşürüldü", "fiyat hedefi düşürüldü"
+            "cuts full year", "etf net outflow", "is in crisis", "not düşürüldü", "fiyat hedefi düşürüldü",
+            "standart endeksinden çıkardı", "standart endeksinden çıkarıldı",
+            "standart endeksten çıkardı", "standart endeksten çıkarıldı",
+            "ana endeksten çıkardı", "ana endeksten çıkarıldı",
+            "küçük ölçekli endekse", "yakın izleme pazarına", "yakın izleme pazarı",
+            "milyarlarca liralık zarar", "net dönem zararı", "ortak pay satışı",
+            "removed from msci", "dropped from msci", "deleted from msci", "excluded from msci",
+            "removed from index", "dropped from index", "deleted from index", "excluded from index",
+            "aus dem index", "abstieg aus dem"
         };
 
         static const std::unordered_set<std::string> severe_negative_bigrams = {
             "statü uyarısı", "küme düşme", "panik satışı", "devre kesici", "devre kesti",
             "sermaye kaçışı", "likidite krizi", "not indirimi", "taban oldu", "hedef fiyat düşürdü",
             "yasak aşk", "tehlikeye atabilir", "yolun sonuna",
+            "endeksinden çıkardı", "endeksinden çıkarıldı",
+            "endeksten çıkardı", "endeksten çıkarıldı", "endeksten çıkarılma",
+            "endeksten çıkartıldı", "endeks dışı", "endekse indi", "endekse düştü",
+            "listeden çıktı", "listeden silindi", "listeden çıkarıldı", "listeden çıkardı",
+            "kottan çıkarıldı", "kota dışı", "brüt takas", "işlem yasağı",
+            "pay satışı", "ortak satışı", "blok satış", "bedelli sermaye",
+            "msci çıkardı", "msci sildi",
             "capital flight", "margin call", "circuit breaker", "credit downgrade", "profit warning",
             "sell off", "sells off", "bad news", "cuts outlook", "slashes outlook", "bearish pattern",
             "ceo exit", "ceo exits", "ceo resigned", "ceo resignation", "stepped down", "steps down",
             "is out", "slashed its", "slashed price", "slashed target", "closes below", "losing year",
-            "hit with", "etf outflows", "etf outflow"
+            "hit with", "etf outflows", "etf outflow",
+            "index deletion", "index exclusion", "msci deletion", "msci exclusion", "msci downgrade",
+            "small cap", "relegated to", "relegated from", "removed from", "dropped from",
+            "deleted from", "excluded from", "secondary offering", "insider selling", "block trade",
+            "index abstieg", "abstieg aus"
         };
 
         static const std::unordered_set<std::string> positive_words = {
@@ -230,15 +249,18 @@ public:
 
         static const std::unordered_set<std::string> positive_trigrams = {
             "all time high", "price target raised", "raised price target", "beats earnings estimates",
-            "new all time", "etkisiz hale getirdi", "hedef fiyat yükseltti"
+            "new all time", "etkisiz hale getirdi", "hedef fiyat yükseltti",
+            "endekse dahil edildi", "added to msci", "added to index", "included in index"
         };
 
         static const std::unordered_set<std::string> positive_bigrams = {
             "not artırımı", "net kar", "net kâr", "hedef yükseltti", "alım tavsiyesi",
             "anlaşma imzaladı", "sipariş aldı", "ihale kazandı", "rekor kırdı", "en çok kazandıran",
+            "endekse eklendi", "endekse ekledi", "endekse alındı", "endekse girdi", "endekse dahil",
+            "endeksine eklendi", "endeksine ekledi", "endeksine alındı", "endeksine girdi", "endeksine dahil",
             "rate cut", "soft landing", "raises guidance", "raised guidance", "beats estimates",
             "beat estimates", "share buyback", "alltime high", "record high", "great news",
-            "good news", "new contract", "new deal", "etf inflow", "etf inflows"
+            "good news", "new contract", "new deal", "etf inflow", "etf inflows", "index inclusion"
         };
 
         static const std::unordered_set<std::string> negative_words = {
@@ -246,6 +268,7 @@ public:
             "düşüş", "dusus", "düştü", "düşürüldü", "düşürdü", "zarar", "kayıp", "kaybetti", "baskı", "gerileme", "geriledi",
             "kriz", "ceza", "resesyon", "daralma", "daraldı", "zayıf", "endişe", "uyarı", "uyarısı",
             "iptal", "açık", "enflasyonist", "yaptırım", "kısıtlama", "kaybettirdi", "başarısız", "ayrılığı", "ayrılışı",
+            "silindi", "kottan", "dışlandı", "kısıtlandı",
             // English whole-word tokens
             "slump", "slumps", "slumped", "drop", "drops", "dropped",
             "loss", "losses", "loser", "losers", "losing", "lost", "fall", "falls", "fell", "falling", "slide", "slides", "slid",
@@ -256,14 +279,16 @@ public:
             "drag", "drags", "pressure", "pressured", "downside", "overvalued", "underperform", "underweight",
             "fear", "fears", "risk", "risks", "turmoil", "sluggish", "struggle", "struggles", "struggling",
             "contraction", "disappoints", "disappointing", "exit", "exits", "exited", "concern", "concerns",
-            "worries", "worry", "fail", "failed", "failing", "sec", "doj",
+            "worries", "worry", "fail", "failed", "failing", "sec", "doj", "delisted", "delisting",
             // German negative
-            "verlust", "rückgang", "krise", "krisen", "rezession", "warnung", "schwach", "abwertung", "zinsanhebung", "verkaufsdruck"
+            "verlust", "rückgang", "krise", "krisen", "rezession", "warnung", "schwach", "abwertung", "zinsanhebung", "verkaufsdruck",
+            "herabstufung", "abgestuft", "gestrichen"
         };
 
         static const std::unordered_set<std::string> negative_bigrams = {
             "satış baskısı", "hedef düşürdü", "zarar açıkladı", "yabancı çıkışı", "jeopolitik gerilim",
             "kaybettiren hisseler", "değer kaybetti", "düşüş trendi", "taban serisi",
+            "endeksi değişti", "pazar değişikliği",
             "cuts guidance", "cut guidance", "lowered guidance", "lowers guidance",
             "misses estimates", "missed estimates", "rate hike", "trade war", "job cuts",
             "extends downside", "downside targets", "alltime low", "transition concerns"
@@ -378,6 +403,33 @@ public:
             } else if (positive_words.contains(w) || starts_with_any(w, positive_tr_prefixes)) {
                 if (neg) neg_score += 1.0 * cw;
                 else pos_score += 1.15 * cw;
+            }
+        }
+
+        // 4. Cross-script separated-token index exclusion guard (MSCI/Index + removal/relegation)
+        if (neg_score < 2.0) {
+            static const std::unordered_set<std::string> idx_scope_tokens = {
+                "msci", "endeks", "endeksi", "endekse", "endeksten", "endeksinden",
+                "endeksine", "endeksin", "listeden", "kapsamdan", "kottan", "bist", "index"
+            };
+            static const std::unordered_set<std::string> idx_excl_tokens = {
+                "cikardi", "cikarildi", "cikarilan", "cikarilma", "cikartti", "cikartildi",
+                "cikti", "silindi", "sildi", "indi", "dusuruldu", "dislandi",
+                "removed", "dropped", "deleted", "excluded", "relegated", "delisted",
+                "gestrichen", "herabstufung", "abgestuft"
+            };
+            auto norm_tokens = tokenize_words(fold_ascii_lower(text));
+            bool has_idx_scope = false;
+            int excl_idx = -1;
+            for (size_t i = 0; i < norm_tokens.size() && i < tokens.size(); ++i) {
+                if (idx_scope_tokens.contains(norm_tokens[i])) has_idx_scope = true;
+                if (idx_excl_tokens.contains(norm_tokens[i])) excl_idx = static_cast<int>(i);
+            }
+            if (has_idx_scope && excl_idx >= 0) {
+                bool neg = is_negated(static_cast<size_t>(excl_idx), 1);
+                double cw = clause_w[static_cast<size_t>(excl_idx)];
+                if (neg) pos_score += 0.8 * cw;
+                else neg_score += 3.0 * cw;
             }
         }
 
@@ -830,7 +882,10 @@ public:
             "anonim", "ortakligi", "sirketi", "sanayi", "ticaret", "ve", "elektronik",
             "birlesik", "magazalar", "tas", "inc", "corp", "corporation", "ltd", "limited",
             "plc", "se", "ag", "co", "company", "sa", "group", "holding", "holdings",
-            "turk", "turkiye", "turkey", "dec", "usd", "eur", "try", "price", "futures", "the"
+            "turk", "turkiye", "turkey", "enerji", "insaat", "demir", "celik", "cam",
+            "kimya", "hava", "tasimaciligi", "havalimanlari", "otomotiv", "perakende",
+            "icecek", "rafinerileri", "savunma",
+            "dec", "usd", "eur", "try", "price", "futures", "the"
         };
         auto name_toks = tokenize_words(fold_ascii_lower(company_name));
         for (const auto& nt : name_toks) {
@@ -970,7 +1025,7 @@ public:
         out.count_log = std::log1p(n);
         out.strength = out.sticky_score * out.count_log;
         out.dispersion = std::sqrt(var_p);
-        out.is_event_shock = (out.negative_state <= -0.40 || out.positive_state >= 0.45);
+        out.is_event_shock = (out.negative_state <= -0.32 || out.positive_state >= 0.45);
         return out;
     }
 
@@ -1037,7 +1092,7 @@ public:
                 std::string gnews_tr = std::format(
                     "https://news.google.com/rss/search?q={}&hl=tr&gl=TR&ceid=TR:tr",
                     LiveMarketDataClient::url_encode(q_tr));
-                append_unique(client.fetch_rss_headlines(gnews_tr, 5));
+                append_unique(client.fetch_rss_headlines(gnews_tr, 10));
             } else if (prof.ticker.ends_with(".DE") && candidates.size() < 4) {
                 std::string q_de = !clean_name.empty()
                     ? std::format("\"{}\" Aktie OR {}", clean_name, base_sym)
@@ -1045,7 +1100,7 @@ public:
                 std::string gnews_de = std::format(
                     "https://news.google.com/rss/search?q={}&hl=de&gl=DE&ceid=DE:de",
                     LiveMarketDataClient::url_encode(q_de));
-                append_unique(client.fetch_rss_headlines(gnews_de, 4));
+                append_unique(client.fetch_rss_headlines(gnews_de, 6));
             } else {
                 // Global equities & crypto: merge Google News EN wire coverage (Reuters/CNBC/Morningstar) so clickbait listicles cannot hide scandals/downgrades
                 bool is_cryp = prof.ticker.ends_with("-USD") || prof.ticker.ends_with("-EUR");
@@ -1055,7 +1110,7 @@ public:
                 std::string gnews_en = std::format(
                     "https://news.google.com/rss/search?q={}&hl=en-US&gl=US&ceid=US:en",
                     LiveMarketDataClient::url_encode(q_en));
-                append_unique(client.fetch_rss_headlines(gnews_en, 6));
+                append_unique(client.fetch_rss_headlines(gnews_en, 8));
                 if (candidates.size() < 3 && !clean_name.empty() && clean_name != base_sym) {
                     append_unique(client.fetch_live_headlines(clean_name, 4));
                 }
@@ -1087,7 +1142,7 @@ public:
             if (a_q != b_q) return !a_q;
             return a.item.publish_time > b.item.publish_time;
         });
-        if (relevant.size() > 8) relevant.resize(8);
+        if (relevant.size() > 10) relevant.resize(10);
 
         int64_t now_sec = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();

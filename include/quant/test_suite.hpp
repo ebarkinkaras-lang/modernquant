@@ -21,6 +21,7 @@
 #include "hft_lob_engine.hpp"
 #include "backtester.hpp"
 #include "cross_sectional_lab.hpp"
+#include "global_report_pdf.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -62,10 +63,11 @@ public:
         all_ok &= test_cross_sectional_ic_portfolio_and_mcc();
         all_ok &= test_fake_alpha_diagnostics_leakage_and_robustness();
         all_ok &= test_dashboard_report_export_integrity();
+        all_ok &= test_native_unicode_pdf_report_engine();
 
         std::cout << "\n-------------------------------------------------------\n";
         if (all_ok) {
-            std::cout << "\033[32m[PASS] ALL 22 QUANT, CROSS-SECTIONAL, FAKE-ALPHA, STICKY-NLP, HFT/LOB & REPORT TESTS PASSED!\033[0m\n";
+            std::cout << "\033[32m[PASS] ALL 23 QUANT, CROSS-SECTIONAL, FAKE-ALPHA, STICKY-NLP, HFT/LOB & PDF REPORT TESTS PASSED!\033[0m\n";
         } else {
             std::cout << "\033[31m[FAIL] SOME TESTS FAILED!\033[0m\n";
         }
@@ -619,6 +621,21 @@ private:
         ok &= check_cond(rel_nvda_on_aapl == 0.0 && rel_aapl_on_aapl == 1.0,
                          std::format("Cross-ticker headline isolation verified (Nvidia->AAPL: {:.1f}, Apple->AAPL: {:.1f})",
                                      rel_nvda_on_aapl, rel_aapl_on_aapl));
+
+        // MSCI / Index deletion & demotion shock coverage + positive-control isolation
+        double s_msci_std  = NewsSentimentEngine::score_headline("MSCI, Sabancı ve Astor'u standart endeksinden çıkardı");
+        double s_msci_sml  = NewsSentimentEngine::score_headline("MSCI kararı: Sabancı ve Astor küçük ölçekli endekse indi, 18 hisse listeden çıktı");
+        double s_msci_sil  = NewsSentimentEngine::score_headline("MSCI'dan Türkiye kararı: Sabancı Holding ve Astor'un endeksi değişti, 18 hisse listeden silindi");
+        double s_msci_en   = NewsSentimentEngine::score_headline("Company removed from MSCI Standard index");
+        double s_tp_raise  = NewsSentimentEngine::score_headline("Hedef fiyat 500 TL'ye çıkarıldı");
+        double s_idx_add   = NewsSentimentEngine::score_headline("MSCI Türkiye endeksine eklendi");
+        double rel_enerji  = NewsSentimentEngine::compute_headline_relevance_("Elektrik enerji tarifesi değişti", "ASTOR.IS", "Astor Enerji");
+
+        ok &= check_cond(
+            s_msci_std < -0.70 && s_msci_sml < -0.70 && s_msci_sil < -0.70 && s_msci_en < -0.70 &&
+                std::abs(s_tp_raise) < 1e-6 && s_idx_add > 0.35 && rel_enerji < 0.5,
+            std::format("MSCI/index exclusion detected (std={:+.2f}, small={:+.2f}, del={:+.2f}, EN={:+.2f}); neutral-raise={:.2f}, add={:+.2f}, sector-rel={:.2f}",
+                        s_msci_std, s_msci_sml, s_msci_sil, s_msci_en, s_tp_raise, s_idx_add, rel_enerji));
 
         return ok;
     }
@@ -1373,6 +1390,144 @@ private:
         for (int i = 0; i < 6; ++i) {
             fs::remove(fs::path("reports") / "ohlcv" / std::format("RPT{}.TST.json", i + 1), ec);
         }
+        return ok;
+    }
+
+    static bool test_native_unicode_pdf_report_engine() {
+        std::cout << "\n[TEST 23] Pure C++20 Unicode PDF Writer & 3-Market + World Macro 1-Month Report:\n";
+        bool ok = true;
+        namespace fs = std::filesystem;
+
+        // Build clean deterministic GlobalMacroReportData spanning US, XETRA, BIST & Macro Drivers
+        GlobalMacroReportData rep;
+        rep.generated_at = "2026-11-16 12:30";
+        rep.yield_curve.three_month_yield = 0.0412;
+        rep.yield_curve.five_year_yield = 0.0465;
+        rep.yield_curve.ten_year_yield = 0.0515;
+        rep.yield_curve.thirty_year_yield = 0.0540;
+        rep.yield_curve.is_live = true;
+        rep.yield_spread_bps = 103.0;
+        rep.global_macro_score = 0.14;
+        rep.global_regime_title = "DENGELİ / MAKRO SEÇİCİ ROTASYON";
+        rep.global_1m_outlook = "Önümüzdeki 1 ay ABD 10Y (%5.15), VIX (19.9), Brent Petrol ve USD/TRY dinamikleri altında seçici bilanço kalitesi ön planda kalacaktır.";
+
+        auto fill_region = [](RegionDeepReport& reg, const std::string& code, const std::string& title,
+                              const std::string& sym, double spot, double r20, double pe, double ev) {
+            reg.region_code = code;
+            reg.region_title = title;
+            reg.benchmark_tech.symbol = sym;
+            reg.benchmark_tech.display_name = sym;
+            reg.benchmark_tech.unit = (code == "US") ? "$" : "pt";
+            reg.benchmark_tech.spot = spot;
+            reg.benchmark_tech.ret_20d_pct = r20;
+            reg.benchmark_tech.rsi_14 = 54.0;
+            reg.benchmark_tech.sma_20 = spot * 0.99;
+            reg.benchmark_tech.sma_50 = spot * 0.96;
+            reg.benchmark_tech.trend_regime = "Pozitif Trend";
+            for (int k = 0; k < 60; ++k) {
+                reg.benchmark_tech.last_60_prices.push_back(spot * (0.94 + 0.06 * (static_cast<double>(k) / 59.0)));
+            }
+            reg.benchmark_forecast_1m.symbol = sym;
+            reg.benchmark_forecast_1m.spot_price = spot;
+            reg.benchmark_forecast_1m.target_price = spot * 1.022;
+            reg.benchmark_forecast_1m.bull_target = spot * 1.075;
+            reg.benchmark_forecast_1m.bear_support = spot * 0.965;
+            reg.benchmark_forecast_1m.expected_return_pct = 2.2;
+            reg.benchmark_forecast_1m.bull_return_pct = 7.5;
+            reg.benchmark_forecast_1m.bear_return_pct = -3.5;
+            reg.benchmark_forecast_1m.direction = ForecastDirection::Bullish;
+            reg.benchmark_forecast_1m.direction_label = "YUKARI";
+            reg.benchmark_forecast_1m.regime_confidence = 0.72;
+            reg.benchmark_forecast_1m.var_95_pct = -6.8;
+            reg.benchmark_forecast_1m.cvar_95_pct = -8.4;
+            reg.sub_indices_tech = {reg.benchmark_tech};
+            reg.sub_indices_fc = {reg.benchmark_forecast_1m};
+            reg.macro_sent.overall_sentiment_score = 0.18;
+            reg.macro_sent.macro_synthesis = "Güçlü şirket nakit akışları ve dengeli kur görünümü destekleyici.";
+            reg.fund_agg.median_pe = pe;
+            reg.fund_agg.median_ev_ebitda = ev;
+            reg.fund_agg.median_pb = 1.9;
+            reg.fund_agg.mean_ebitda_margin_pct = 24.0;
+            reg.fund_agg.mean_roe_pct = 18.5;
+            reg.fund_agg.grade_a_count = 6;
+            reg.fund_agg.grade_b_count = 4;
+            reg.fund_agg.pct_above_vwap = 65.0;
+            reg.fund_agg.pct_rsi_bull = 60.0;
+            AlphaCandidate c;
+            c.symbol = sym;
+            c.market = code;
+            c.category = AlphaCategory::VolatilitySqueeze;
+            c.category_label = "VOLATİLİTE SIKIŞMASI";
+            c.current_price = spot;
+            c.return_30d_pct = r20;
+            c.net_asymmetry_ratio = 2.85;
+            c.fundamentals.is_available = true;
+            c.fundamentals.has_ebitda = true;
+            c.fundamentals.ev_to_ebitda = ev;
+            c.fundamentals.quality_grade = "A";
+            c.has_live_news = true;
+            c.sticky_sentiment_score = 0.35;
+            c.predictability_ic = 0.42;
+            c.predictability_hit_rate = 0.62;
+            reg.candidates.push_back(c);
+        };
+
+        fill_region(rep.us, "US", "ABD Borsaları (Wall Street)", "SPY", 754.0, 2.4, 24.5, 16.8);
+        fill_region(rep.xetra, "XETRA", "Almanya Borsası (XETRA)", "^GDAXI", 26716.0, 1.8, 15.2, 9.6);
+        fill_region(rep.bist, "BIST", "Türkiye Borsası (BIST 100)", "XU100.IS", 11909.0, 3.1, 7.8, 5.9);
+        rep.bist_usd_ret20d_pct = 1.9;
+        rep.bist_usd_ret60d_pct = 4.2;
+
+        AlphaCandidate shock_c;
+        shock_c.symbol = "TESTSHOCK.IS";
+        shock_c.market = "BIST";
+        shock_c.category = AlphaCategory::CrowdedTradeWarning;
+        shock_c.category_label = "OLAY ŞOKU VETO";
+        shock_c.has_live_news = true;
+        shock_c.is_event_shock = true;
+        shock_c.sticky_sentiment_score = -0.48;
+        shock_c.sentiment_score = -0.53;
+        shock_c.quant_diagnosis = "MSCI endeksinden çıkarılma şoku tespit edildi.";
+        rep.bist.candidates.push_back(shock_c);
+
+        MacroDriverEntry dr;
+        dr.symbol = "BZ=F";
+        dr.label = "Brent Ham Petrol";
+        dr.unit = "$/bbl";
+        dr.role_note = "Küresel enflasyon ve enerji maliyeti";
+        dr.tech.spot = 95.30;
+        dr.tech.ret_5d_pct = 1.1;
+        dr.tech.ret_20d_pct = 4.2;
+        dr.tech.ann_vol_pct = 31.0;
+        dr.forecast_1m.target_price = 97.4;
+        dr.forecast_1m.bear_support = 89.2;
+        dr.forecast_1m.bull_target = 105.8;
+        dr.forecast_1m.expected_return_pct = 2.2;
+        dr.forecast_1m.direction = ForecastDirection::Bullish;
+        rep.drivers.push_back(dr);
+
+        rep.corr_row_labels = {"ABD SPY", "Almanya DAX", "Türkiye BIST"};
+        rep.corr_col_labels = {"ABD 10Y", "VIX", "Brent"};
+        rep.corr_matrix = {{-0.32, -0.78, 0.12}, {-0.24, -0.62, -0.18}, {-0.15, -0.35, -0.22}};
+        rep.corr_samples = {{120, 120, 120}, {120, 120, 120}, {120, 120, 120}};
+        rep.correlation_summary = "Tarih-hizalı test korelasyon özeti.";
+
+        const std::string pdf_path = "reports/_unit_test_global_1m.pdf";
+        bool saved = GlobalMacroReportEngine::generate_pdf_report(rep, pdf_path);
+        std::string bytes;
+        if (saved && fs::exists(pdf_path)) {
+            std::ifstream ifs(pdf_path, std::ios::binary);
+            bytes.assign(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+        }
+        bool struct_ok = saved && bytes.starts_with("%PDF-1.4") &&
+                         bytes.find("/Count 4") != std::string::npos &&
+                         bytes.find("xref") != std::string::npos &&
+                         bytes.find("%%EOF") != std::string::npos &&
+                         bytes.size() > 15000;
+        ok &= check_cond(struct_ok,
+                         std::format("4-page Turkish Unicode + Vector Chart PDF written ({} bytes)", bytes.size()));
+        std::error_code ec;
+        fs::remove(pdf_path, ec);
         return ok;
     }
 };

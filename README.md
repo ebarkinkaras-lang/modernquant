@@ -211,6 +211,7 @@ cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 │ T   [TEMA]     Renk & 80s CRT Teması        Amber VT220, Yeşil VT100, VAX Cyan, Neon, CRT Titreşim │
 │ V   [TEST]     Otomatik Doğrulama Testi     Tüm kitap formülleri ve ground-truth numerik doğrulaması │
 │ W   [WEB-UI]   Görsel Araştırma Panosu (Web) React + FastAPI interaktif IC, ısı haritası & portföy UI │
+│ R   [REPORT]   Küresel 1Ay Makro & Borsa PDF ABD, XETRA, BIST teknik/temel analiz + Dünya Ekonomisi PDF │
 │ 11  [INFO]     Hakkında & Mimari            Kitap kaynakları, C++ standartları ve proje detayları │
 │ 0   [EXIT]     Çıkış                        Terminal uygulamasını kapat  │
 └───────────────────────────────────────────────────────────────────────────────┘
@@ -218,8 +219,9 @@ cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
 ---
 
-## 📊 Cross-Sectional Research Lab & Visual Web Dashboard (`[W]` / `--export-report`)
+## 📊 Cross-Sectional Research Lab, PDF Macro Engine & Web Dashboard (`[W]` / `[R]`)
 
+* **Pure C++20 Global Macro & 3-Market 1M PDF Report (`global_report_pdf.hpp`, `pdf_writer.hpp`):** Generates a 4-page UTF-8 TrueType + vector-chart PDF (`[R]` or `./bin/quant_suite --pdf-report`) covering US (`SPY`/`QQQ`/`IWM`), Germany (`XETRA ^GDAXI`), Turkey (`BIST 100`), 10 global macro drivers (`10Y`/`3M` Treasury yields, `VIX`, `DXY`, `EUR/USD`, Brent oil, Gold, Copper, `USD/TRY`, `BTC-USD`), 6M date-aligned correlations, `±1σ` forecast cones, TTM multiples, and active event-shock vetoes.
 * **Cross-Sectional Portfolio Backtest & Fake-Alpha Diagnostics (`cross_sectional_lab.hpp`):** Runs expanding multi-fold cross-sectional backtests (`Mean CS-IC`, `Q5-Q1` spread, transaction costs), Fake-Alpha bias decomposition (Volatility-Proxy & High-Vol-Only ablation), Look-Ahead Leakage invariance audit, and predictability metrics (`Accuracy`, `Lift`, `MCC`, `Macro-F1`).
 * **Interactive Research UI (`dashboard/`):** Export C++ CSV/JSON & OHLCV reports (`./bin/quant_suite --export-report US`) and launch the FastAPI + React/Vite dashboard:
 ```bash
@@ -230,7 +232,7 @@ python dashboard/start.py
 
 ## 🧪 Automated Verification Suite
 
-Run `./bin/quant_suite --test` or `make test` to execute all 22 automated C++ verification tests:
+Run `./bin/quant_suite --test` or `make test` to execute all 23 automated C++ verification tests:
 
 ```text
 [TEST 1]  ChronoDate & Day Count Conventions (Chapter 7)                ✔ PASS
@@ -244,7 +246,7 @@ Run `./bin/quant_suite --test` or `make test` to execute all 22 automated C++ ve
 [TEST 9]  Causal Walk-Forward Backtest & Non-Overlapping Blocks         ✔ PASS
 [TEST 10] Asymmetric Alpha Screener + FAVÖK, Sticky Shock & Time-IC     ✔ PASS
 [TEST 11] Boost.JSON Null-Bar Alignment, Wilder ATR & Date Join         ✔ PASS
-[TEST 12] Word-Boundary NLP & Turkish UTF-8 Negation Sentiment          ✔ PASS
+[TEST 12] Word-Boundary NLP & Turkish UTF-8 Negation + MSCI Sentiment   ✔ PASS
 [TEST 13] Multi-Currency FAVÖK (EBITDA), Bank & Commodity Engine        ✔ PASS
 [TEST 14] Data Quality Telemetry, Scoring Integrity & Alerts            ✔ PASS
 [TEST 15] Intraday Bar Recovery, Dynamic Cache & Live Yield Wiring      ✔ PASS
@@ -255,6 +257,7 @@ Run `./bin/quant_suite --test` or `make test` to execute all 22 automated C++ ve
 [TEST 20] Cross-Sectional Portfolio Engine, CS-IC, Q-Spread & MCC       ✔ PASS
 [TEST 21] Fake-Alpha Diagnostics, Look-Ahead Seal & Robustness Suite    ✔ PASS
 [TEST 22] Dashboard CSV/JSON + OHLCV Export Contract Verification       ✔ PASS
+[TEST 23] Pure C++20 Unicode PDF Writer & Global Macro 1M PDF Report    ✔ PASS
 ```
 
 ---
@@ -294,17 +297,19 @@ ModernQuantSuite/
 │       ├── forecast_backtest.hpp     # 2-year causal walk-forward & block validation engine
 │       ├── forecast_engine.hpp       # 252-day Grinold-Kahn + asymmetric tail VaR/CVaR engine
 │       ├── fundamentals.hpp          # Thread-safe multi-currency TTM FAVÖK (EBITDA), Bank & Macro engine
+│       ├── global_report_pdf.hpp     # Live US/XETRA/BIST & World Macro 1-month PDF research engine
 │       ├── hft_lob_engine.hpp        # O(1) Circular LOB, SPSC Lock-Free Hub, RMS, IOR, Nash MM & Ch.6 Bench
 │       ├── i18n.hpp                  # Trilingual (TR / EN / DE) localization engine
 │       ├── live_market_data.hpp      # Thread-safe Boost.JSON Yahoo Finance client w/ RateLimiter & CircuitBreaker
 │       ├── monte_carlo.hpp           # Parallel Monte Carlo (GBM, Heston, Merton Jump, Dupire Local Vol & Barriers)
-│       ├── news_sentiment.hpp        # Dual-stream sticky sentiment, event-shock & negation-aware NLP
+│       ├── news_sentiment.hpp        # Dual-stream sticky sentiment, MSCI/index exclusion & negation-aware NLP
 │       ├── option_info.hpp           # Derivatives parameter definitions
 │       ├── pairs_trading.hpp         # Date-aligned OLS hedge ratio, OU half-life & IOR net-of-cost edge
 │       ├── payoff.hpp                # Polymorphic payoff functors (Call/Put)
+│       ├── pdf_writer.hpp            # Zero-dependency ISO 32000-1 PDF-1.4 & TrueType Unicode engine
 │       ├── portfolio_linear_algebra.hpp # Eigen matrix math, Cholesky, DPO (PSO/RL), QR & PCA
 │       ├── terminal_chart.hpp        # Real OHLCV Unicode candlestick & Wilder RSI chart engine
-│       ├── test_suite.hpp            # 22-part automated quant, CS, HFT/LOB, resilience & FAVÖK verification suite
+│       ├── test_suite.hpp            # 23-part automated quant, CS, HFT/LOB, PDF & FAVÖK verification suite
 │       ├── theme_engine.hpp          # 1980s retro CRT VT220/VT100 theme manager
 │       ├── trading_signals.hpp       # Cache-aligned Boost streaming indicators, Drawdown & Stress Scenarios
 │       └── yield_curve.hpp           # US Treasury yield curve bootstrapping

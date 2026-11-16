@@ -64,6 +64,8 @@ struct AlphaCandidate {
   // Integrated Sticky Dual-Stream News Sentiment & Event-Shock Guard
   double sentiment_score{0.0};
   double sticky_sentiment_score{0.0};
+  double sticky_positive_state{0.0};
+  double sticky_negative_state{0.0};
   double sent_strength{0.0};
   double sent_dispersion{0.0};
   bool is_event_shock{false};
@@ -196,6 +198,10 @@ public:
     for (const auto &s : slots) {
       if (s.valid) {
         DataQualityDashboard::record_asset_quality(s.data, &s.fund);
+        if (options.use_sticky_sentiment) {
+          DataQualityDashboard::record_news_fetch(
+              s.data.symbol, s.sent.has_live_news, s.sent.headlines.size());
+        }
         if (s.data.is_live)
           any_live = true;
       }
@@ -215,12 +221,7 @@ public:
           s.item, s.data, s.fund, bench_ret_20d,
           options.use_sticky_sentiment ? &s.sent : nullptr);
 
-      const bool is_neg_shock_risk =
-          candidate.has_live_news &&
-          ((candidate.is_event_shock &&
-            candidate.sticky_sentiment_score <= -0.30) ||
-           candidate.sticky_sentiment_score <= -0.45 ||
-           candidate.sentiment_score <= -0.50);
+      const bool is_neg_shock_risk = is_negative_event_shock_(candidate);
 
       if (options.exclude_crowded && options.filter_negative_shocks &&
           is_neg_shock_risk) {
@@ -441,12 +442,13 @@ public:
                                        ? pal.red_rgb
                                        : pal.glow_rgb);
         std::string shock_badge;
-        if (c.is_event_shock && c.sticky_sentiment_score <= -0.30) {
+        if (is_negative_event_shock_(c)) {
           shock_badge = std::format(
               " {}{}{}", pal.red_rgb,
               I18n::tr("⚡ OLAY ŞOKU!", "⚡ EVENT SHOCK!", "⚡ EREIGNISSCHOCK!"),
               pal.reset_code);
-        } else if (c.is_event_shock) {
+        } else if (c.is_event_shock && c.sticky_positive_state >= 0.45 &&
+                   c.sticky_sentiment_score > 0.15) {
           shock_badge = std::format(
               " {}{}{}", pal.green_rgb,
               I18n::tr("⚡ KATALİZÖR", "⚡ CATALYST", "⚡ KATALYSATOR"),
@@ -791,6 +793,14 @@ private:
     return out;
   }
 
+  static bool is_negative_event_shock_(const AlphaCandidate &c) {
+    if (!c.has_live_news)
+      return false;
+    return (c.is_event_shock && c.sticky_sentiment_score <= -0.28) ||
+           (c.sticky_negative_state <= -0.32 && c.sentiment_score <= -0.28) ||
+           c.sticky_sentiment_score <= -0.45 || c.sentiment_score <= -0.50;
+  }
+
   static AlphaCandidate
   evaluate_asset_(const UniverseAsset &asset, const RealTimeAssetData &data,
                   const FundamentalProfile &fund, double bench_ret_20d,
@@ -808,6 +818,8 @@ private:
     if (sent != nullptr) {
       c.sentiment_score = sent->sentiment_score;
       c.sticky_sentiment_score = sent->sticky_sentiment_score;
+      c.sticky_positive_state = sent->sticky_positive_state;
+      c.sticky_negative_state = sent->sticky_negative_state;
       c.sent_strength = sent->sent_strength;
       c.sent_dispersion = sent->sent_dispersion;
       c.is_event_shock = sent->is_event_shock;
@@ -929,11 +941,7 @@ private:
     double vol_projection =
         c.atr_14 * std::max(0.75, 2.85 + 1.55 * flow_bonus +
                                       1.35 * squeeze_bonus - crowd_penalty);
-    const bool has_neg_shock =
-        c.has_live_news &&
-        ((c.is_event_shock && c.sticky_sentiment_score <= -0.30) ||
-         c.sticky_sentiment_score <= -0.45 ||
-         c.sentiment_score <= -0.50);
+    const bool has_neg_shock = is_negative_event_shock_(c);
     const bool has_neg_drag =
         !has_neg_shock && c.has_live_news && c.sticky_sentiment_score <= -0.20;
     const bool has_pos_catalyst = c.has_live_news &&

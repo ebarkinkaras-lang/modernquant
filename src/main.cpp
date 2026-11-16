@@ -31,6 +31,7 @@
 #include "quant/data_quality.hpp"
 #include "quant/hft_lob_engine.hpp"
 #include "quant/cross_sectional_lab.hpp"
+#include "quant/global_report_pdf.hpp"
 #include "quant/i18n.hpp"
 #include <cstdlib>
 
@@ -170,6 +171,9 @@ void print_menu() {
         {"W",  "[WEB-UI]",
          I18n::tr("Görsel Araştırma Panosu (Web)", "Visual Research Dashboard (Web)", "Visuelles Forschungs-Dashboard"),
          I18n::tr("React + FastAPI interaktif IC, ısı haritası & portföy UI", "React + FastAPI interactive IC, heatmap & portfolio UI", "React + FastAPI interaktive IC-, Heatmap- & Trade-UI")},
+        {"R",  "[REPORT]",
+         I18n::tr("Küresel 1Ay Makro & Borsa PDF", "Global 1M Macro & Market PDF", "Globaler 1M-Makrobericht PDF"),
+         I18n::tr("ABD, XETRA, BIST teknik/temel analiz + Dünya Ekonomisi PDF", "US, XETRA, BIST tech/fund analysis + World Macro 1M PDF", "USA, XETRA, BIST Analyse + Weltwirtschaft 1M-PDF")},
         {"11", "[INFO]",
          I18n::tr("Hakkında & Mimari", "About & Architecture", "Über das Terminal & Architektur"),
          I18n::tr("Kitap kaynakları, C++ standartları ve proje detayları", "Book sources, ISO C++ standards & project overview", "Buchquellen, ISO C++ Standards & Projektübersicht")},
@@ -1761,6 +1765,91 @@ void run_investment_advisor_interactive(LiveMarketDataClient& client) {
     QuantInvestmentAdvisor::render_plan_cards(plan);
 }
 
+static std::string make_default_pdf_report_path_() {
+    auto now = std::chrono::system_clock::now();
+    std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    std::tm tm_now{};
+#ifdef _WIN32
+    localtime_s(&tm_now, &tt);
+#else
+    localtime_r(&tt, &tm_now);
+#endif
+    return std::format("reports/ModernQuant_Global_1M_Report_{:04d}{:02d}{:02d}_{:02d}{:02d}{:02d}.pdf",
+                       tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday,
+                       tm_now.tm_hour, tm_now.tm_min, tm_now.tm_sec);
+}
+
+void run_global_pdf_report_interactive(LiveMarketDataClient& client) {
+    auto& te = ThemeEngine::instance();
+    const auto& pal = te.palette();
+    std::cout << "\n" << pal.glow_rgb
+              << I18n::tr("--- [R] KÜRESEL BORSALAR & DÜNYA EKONOMİSİ 1 AYLIK PDF RAPOR MOTORU ---",
+                          "--- [R] GLOBAL MARKETS & WORLD MACRO 1-MONTH PDF REPORT ENGINE ---",
+                          "--- [R] GLOBALE MÄRKTE & WELTWIRTSCHAFT 1M-PDF-BERICHT ---")
+              << pal.reset_code << "\n";
+    std::cout << I18n::tr(
+        "Kapsam: ABD (SPY/QQQ/IWM + Hisse Temeli), Almanya (XETRA/DAX 40), Türkiye (BIST 100)\n"
+        "        + Dünya Ekonomisi Değişkenleri (ABD Faizleri, VIX, DXY, Brent, Altın, Bakır, USD/TRY)\n"
+        "        + 6-Aylık Makro Korelasyonlar, Vektör Tahmin Konileri ve Önümüzdeki 1 Ay Öngörüleri\n",
+        "Scope : US (Wall Street), Germany (XETRA DAX 40), Turkey (BIST 100)\n"
+        "        + Global Drivers (US Yields, VIX, DXY, Brent, Gold, Copper, USD/TRY)\n"
+        "        + 6M Date-Aligned Correlations, Vector Forecast Cones & 1-Month Projections\n",
+        "Umfang: USA, Deutschland (DAX 40), Türkei (BIST 100) + Makrovariablen + 1M-Prognosen (PDF)\n"
+    );
+    std::cout << I18n::tr(
+        "\nÇıktı PDF dosya yolu [Enter = otomatik oluştur]: ",
+        "\nOutput PDF path [Enter = auto timestamped file]: ",
+        "\nAusgabe-PDF-Pfad [Enter = automatisch]: "
+    );
+    std::string out_path;
+    std::getline(std::cin, out_path);
+    while (!out_path.empty() && (out_path.front() == ' ' || out_path.front() == '"')) out_path.erase(out_path.begin());
+    while (!out_path.empty() && (out_path.back() == ' ' || out_path.back() == '"' || out_path.back() == '\r')) out_path.pop_back();
+    if (out_path.empty()) {
+        out_path = make_default_pdf_report_path_();
+    } else if (!out_path.ends_with(".pdf") && !out_path.ends_with(".PDF")) {
+        out_path += ".pdf";
+    }
+
+    std::cout << "\n" << pal.dim_rgb
+              << I18n::tr("Canlı 3 bölge endeksleri, şirket bilançoları (FAVÖK/F/K), dünya makro verileri ve haber akışları toplanıyor...",
+                          "Fetching live 3-region indices, corporate fundamentals, global macro drivers & sticky news...",
+                          "Lade Live-Indizes, Unternehmensbilanzen, globale Makrovariablen & News...")
+              << pal.reset_code << "\n";
+
+    auto rep = GlobalMacroReportEngine::collect_report_data(client);
+    bool ok = GlobalMacroReportEngine::generate_pdf_report(rep, out_path);
+    if (!ok) {
+        std::cout << pal.red_rgb
+                  << I18n::tr("[HATA] PDF dosyası yazılamadı: ", "[ERROR] Failed to write PDF: ", "[FEHLER] PDF konnte nicht geschrieben werden: ")
+                  << out_path << pal.reset_code << "\n";
+        return;
+    }
+
+    std::string abs_path = std::filesystem::absolute(out_path).string();
+    GlobalMacroReportEngine::render_terminal_summary(rep, abs_path);
+
+    std::cout << I18n::tr(
+        "Oluşturulan PDF raporu varsayılan görüntüleyicide açılsın mı? [e/H]: ",
+        "Open the generated PDF in your default viewer? [y/N]: ",
+        "Erstelltes PDF im Standard-Viewer öffnen? [j/N]: "
+    );
+    std::string ans;
+    std::getline(std::cin, ans);
+    if (!ans.empty() && (ans[0] == 'e' || ans[0] == 'E' || ans[0] == 'y' || ans[0] == 'Y' || ans[0] == 'j' || ans[0] == 'J')) {
+#ifdef _WIN32
+        std::string cmd = std::format("start \"\" \"{}\"", abs_path);
+        std::system(cmd.c_str());
+#elif __APPLE__
+        std::string cmd = std::format("open \"{}\"", abs_path);
+        std::system(cmd.c_str());
+#else
+        std::string cmd = std::format("xdg-open \"{}\" >/dev/null 2>&1 &", abs_path);
+        std::system(cmd.c_str());
+#endif
+    }
+}
+
 void run_web_dashboard_launcher(LiveMarketDataClient& client) {
     auto& te = ThemeEngine::instance();
     const auto& pal = te.palette();
@@ -1860,6 +1949,24 @@ int main(int argc, char* argv[]) {
         if (arg == "--test") {
             bool pass = AutomatedTestSuite::run_all_tests();
             return pass ? 0 : 1;
+        } else if (arg == "--pdf-report") {
+            std::string out_path;
+            if (i + 1 < argc) {
+                std::string nxt = argv[i + 1];
+                if (!nxt.starts_with("--")) {
+                    out_path = argv[++i];
+                }
+            }
+            if (out_path.empty()) out_path = make_default_pdf_report_path_();
+            LiveMarketDataClient cli;
+            auto rep = GlobalMacroReportEngine::collect_report_data(cli);
+            bool ok = GlobalMacroReportEngine::generate_pdf_report(rep, out_path);
+            if (ok) {
+                GlobalMacroReportEngine::render_terminal_summary(rep, std::filesystem::absolute(out_path).string());
+            } else {
+                std::cerr << "[ERROR] Failed to write PDF: " << out_path << "\n";
+            }
+            return ok ? 0 : 1;
         } else if (arg == "--export-report" && i + 1 < argc) {
             std::string reg = argv[++i];
             std::transform(reg.begin(), reg.end(), reg.begin(), ::toupper);
@@ -1956,6 +2063,8 @@ int main(int argc, char* argv[]) {
             AutomatedTestSuite::run_all_tests();
         } else if (choice == "W") {
             run_web_dashboard_launcher(market_client);
+        } else if (choice == "R") {
+            run_global_pdf_report_interactive(market_client);
         } else if (choice == "11") {
             print_about_info();
         } else {
