@@ -1118,8 +1118,9 @@ private:
     // quality + Sticky Sentiment + Time-IC
     std::string fund_tag =
         fund.is_available
-            ? std::format(" [Temel Not: {} ({:+.2f})]", fund.quality_grade,
-                          fund.fundamental_score)
+            ? std::format(" [{}: {} ({:+.2f})]",
+                          I18n::tr("Temel Not", "Fund. Grade", "Fund.-Note"),
+                          fund.quality_grade, fund.fundamental_score)
             : "";
 
     if (c.category == AlphaCategory::CrowdedTradeWarning) {

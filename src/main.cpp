@@ -1943,9 +1943,31 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    // Parse CLI arguments: --test, --lang en|de|tr, --language en|de|tr
+    // Pass 1: apply language selection regardless of argument order
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        if ((arg == "--lang" || arg == "--language") && i + 1 < argc) {
+            std::string l = argv[++i];
+            std::transform(l.begin(), l.end(), l.begin(), ::tolower);
+            if (l == "en" || l == "english") I18n::set_lang(Language::English);
+            else if (l == "de" || l == "german" || l == "deutsch") I18n::set_lang(Language::German);
+            else if (l == "tr" || l == "turkish" || l == "turkce") I18n::set_lang(Language::Turkish);
+        } else if (arg == "--lang=en" || arg == "--language=en") {
+            I18n::set_lang(Language::English);
+        } else if (arg == "--lang=de" || arg == "--language=de") {
+            I18n::set_lang(Language::German);
+        } else if (arg == "--lang=tr" || arg == "--language=tr") {
+            I18n::set_lang(Language::Turkish);
+        }
+    }
+
+    // Pass 2: execute CLI actions (--test, --pdf-report, --export-report)
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--lang" || arg == "--language") {
+            if (i + 1 < argc) ++i;
+            continue;
+        }
         if (arg == "--test") {
             bool pass = AutomatedTestSuite::run_all_tests();
             return pass ? 0 : 1;
@@ -1991,18 +2013,6 @@ int main(int argc, char* argv[]) {
             auto rep = CrossSectionalBacktestEngine::run_regional_study(cli, reg, 5, 4, "2y", true);
             CrossSectionalBacktestEngine::render_report(rep);
             return rep.valid ? 0 : 1;
-        } else if ((arg == "--lang" || arg == "--language") && i + 1 < argc) {
-            std::string l = argv[++i];
-            std::transform(l.begin(), l.end(), l.begin(), ::tolower);
-            if (l == "en" || l == "english") I18n::set_lang(Language::English);
-            else if (l == "de" || l == "german" || l == "deutsch") I18n::set_lang(Language::German);
-            else if (l == "tr" || l == "turkish" || l == "turkce") I18n::set_lang(Language::Turkish);
-        } else if (arg == "--lang=en" || arg == "--language=en") {
-            I18n::set_lang(Language::English);
-        } else if (arg == "--lang=de" || arg == "--language=de") {
-            I18n::set_lang(Language::German);
-        } else if (arg == "--lang=tr" || arg == "--language=tr") {
-            I18n::set_lang(Language::Turkish);
         }
     }
 

@@ -1526,8 +1526,23 @@ private:
                          bytes.size() > 15000;
         ok &= check_cond(struct_ok,
                          std::format("4-page Turkish Unicode + Vector Chart PDF written ({} bytes)", bytes.size()));
+
+        const Language orig_lang = I18n::lang();
+        bool de_ok = false, en_ok = false;
+        const std::string pdf_de = "reports/_unit_test_global_1m_de.pdf";
+        const std::string pdf_en = "reports/_unit_test_global_1m_en.pdf";
+        I18n::set_lang(Language::German);
+        de_ok = GlobalMacroReportEngine::generate_pdf_report(rep, pdf_de) && fs::exists(pdf_de) && fs::file_size(pdf_de) > 15000;
+        I18n::set_lang(Language::English);
+        en_ok = GlobalMacroReportEngine::generate_pdf_report(rep, pdf_en) && fs::exists(pdf_en) && fs::file_size(pdf_en) > 15000;
+        I18n::set_lang(orig_lang);
+        ok &= check_cond(de_ok && en_ok,
+                         "Trilingual PDF rendering verified across Turkish, English, and German (umlauts/eszett)");
+
         std::error_code ec;
         fs::remove(pdf_path, ec);
+        fs::remove(pdf_de, ec);
+        fs::remove(pdf_en, ec);
         return ok;
     }
 };

@@ -192,6 +192,9 @@ public:
     RealTimeAssetData d_dax = find_data("^GDAXI");
     RealTimeAssetData d_xu100 = find_data("XU100.IS");
 
+    const std::string h1m_label =
+        I18n::tr("1 Ay (21 İşG)", "1 Month (21TD)", "1 Monat (21HT)");
+
     // US
     rep.us.region_code = "US";
     rep.us.region_title = I18n::tr("ABD Borsaları (Wall Street)",
@@ -201,7 +204,7 @@ public:
     rep.us.benchmark_tech = compute_technical_snapshot_(d_spy, "S&P 500 (SPY)", "$");
     rep.us.benchmark_forecast_1m = QuantForecastEngine::forecast_for_trading_days(
         d_spy, 21, rep.us.macro_sent.overall_sentiment_score, true, nullptr,
-        "1 Ay (21 İşG)", 30, &rep.yield_curve);
+        h1m_label, 30, &rep.yield_curve);
     rep.us.sub_indices_tech = {
         rep.us.benchmark_tech,
         compute_technical_snapshot_(d_qqq, "NASDAQ-100 (QQQ)", "$"),
@@ -211,10 +214,10 @@ public:
         rep.us.benchmark_forecast_1m,
         QuantForecastEngine::forecast_for_trading_days(
             d_qqq, 21, rep.us.macro_sent.overall_sentiment_score, true, nullptr,
-            "1 Ay (21 İşG)", 30, &rep.yield_curve),
+            h1m_label, 30, &rep.yield_curve),
         QuantForecastEngine::forecast_for_trading_days(
             d_iwm, 21, rep.us.macro_sent.overall_sentiment_score, true, nullptr,
-            "1 Ay (21 İşG)", 30, &rep.yield_curve),
+            h1m_label, 30, &rep.yield_curve),
     };
     rep.us.fund_agg = aggregate_fundamentals_(rep.us.candidates);
 
@@ -222,12 +225,12 @@ public:
     rep.xetra.region_code = "XETRA";
     rep.xetra.region_title = I18n::tr("Almanya Borsası (XETRA / DAX 40)",
                                       "Germany Equities (XETRA / DAX 40)",
-                                      "Deutscher Aktienmarkt (XETRA / DAX 40)");
+                                      "Deutschland (XETRA DAX 40)");
     rep.xetra.benchmark_data = d_dax;
     rep.xetra.benchmark_tech = compute_technical_snapshot_(d_dax, "DAX 40 (^GDAXI)", "pt");
     rep.xetra.benchmark_forecast_1m = QuantForecastEngine::forecast_for_trading_days(
         d_dax, 21, rep.xetra.macro_sent.overall_sentiment_score, true, nullptr,
-        "1 Ay (21 İşG)", 30, &rep.yield_curve);
+        h1m_label, 30, &rep.yield_curve);
     rep.xetra.sub_indices_tech = {rep.xetra.benchmark_tech};
     rep.xetra.sub_indices_fc = {rep.xetra.benchmark_forecast_1m};
     rep.xetra.fund_agg = aggregate_fundamentals_(rep.xetra.candidates);
@@ -241,7 +244,7 @@ public:
     rep.bist.benchmark_tech = compute_technical_snapshot_(d_xu100, "BIST 100 (XU100.IS)", "pt");
     rep.bist.benchmark_forecast_1m = QuantForecastEngine::forecast_for_trading_days(
         d_xu100, 21, rep.bist.macro_sent.overall_sentiment_score, true, nullptr,
-        "1 Ay (21 İşG)", 30, nullptr);
+        h1m_label, 30, nullptr);
     rep.bist.sub_indices_tech = {rep.bist.benchmark_tech};
     rep.bist.sub_indices_fc = {rep.bist.benchmark_forecast_1m};
     rep.bist.fund_agg = aggregate_fundamentals_(rep.bist.candidates);
@@ -291,28 +294,33 @@ public:
       e.data = find_data(ds.sym);
       e.tech = compute_technical_snapshot_(e.data, ds.label, ds.unit);
       e.forecast_1m = QuantForecastEngine::forecast_for_trading_days(
-          e.data, 21, 0.0, false, nullptr, "1 Ay (21 İşG)", 30, nullptr);
+          e.data, 21, 0.0, false, nullptr, h1m_label, 30, nullptr);
       rep.drivers.push_back(std::move(e));
     }
 
     // Compute 6-Month Date-Aligned Cross-Asset Correlation Matrix
     const std::vector<std::pair<std::string, RealTimeAssetData>> eq_rows = {
-        {"ABD S&P 500 (SPY)", d_spy},
-        {"ABD NASDAQ (QQQ)", d_qqq},
-        {"ABD Russell (IWM)", d_iwm},
-        {"Almanya DAX (^GDAXI)", d_dax},
-        {"Türkiye BIST 100", d_xu100},
+        {I18n::tr("ABD S&P 500 (SPY)", "US S&P 500 (SPY)", "US S&P 500 (SPY)"), d_spy},
+        {I18n::tr("ABD NASDAQ (QQQ)", "US NASDAQ (QQQ)", "US NASDAQ (QQQ)"), d_qqq},
+        {I18n::tr("ABD Russell (IWM)", "US Russell (IWM)", "US Russell (IWM)"), d_iwm},
+        {I18n::tr("Almanya DAX (^GDAXI)", "Germany DAX (^GDAXI)", "Deutschland DAX (^GDAXI)"), d_dax},
+        {I18n::tr("Türkiye BIST 100", "Turkey BIST 100", "Türkei BIST 100"), d_xu100},
     };
     const std::vector<std::pair<std::string, RealTimeAssetData>> mac_cols = {
-        {"ABD 10Y", find_data("^TNX")},  {"VIX", find_data("^VIX")},
-        {"DXY", find_data("DX-Y.NYB")}, {"Brent", find_data("BZ=F")},
-        {"Altın", find_data("GC=F")},   {"Bakır", find_data("HG=F")},
+        {I18n::tr("ABD 10Y", "US 10Y", "US 10J"), find_data("^TNX")},
+        {"VIX", find_data("^VIX")},
+        {"DXY", find_data("DX-Y.NYB")},
+        {"Brent", find_data("BZ=F")},
+        {"Altın / Gold", find_data("GC=F")},
+        {I18n::tr("Bakır", "Copper", "Kupfer"), find_data("HG=F")},
         {"USD/TRY", d_usdtry},
     };
     rep.corr_row_labels.reserve(eq_rows.size());
     rep.corr_col_labels.reserve(mac_cols.size());
     for (const auto &c : mac_cols)
-      rep.corr_col_labels.push_back(c.first);
+      rep.corr_col_labels.push_back(c.first == "Altın / Gold"
+                                        ? I18n::tr("Altın", "Gold", "Gold")
+                                        : c.first);
 
     for (const auto &r : eq_rows) {
       rep.corr_row_labels.push_back(r.first);
@@ -364,29 +372,45 @@ public:
     const auto &pal = te.palette();
     std::cout << "\n" << pal.glow_rgb
               << "╔══════════════════════════════════════════════════════════════════════════════════════════════╗\n"
-              << std::format("║  📄 KÜRESEL BORSALAR (ABD/XETRA/BIST) & DÜNYA EKONOMİSİ 1 AYLIK RAPOR ÖZETİ                ║\n")
+              << std::format("║  📄 {:<87}  ║\n",
+                             I18n::tr("KÜRESEL BORSALAR (ABD/XETRA/BIST) & DÜNYA EKONOMİSİ 1 AYLIK RAPOR ÖZETİ",
+                                      "GLOBAL EQUITIES (US/XETRA/BIST) & WORLD MACRO 1-MONTH PDF SUMMARY",
+                                      "GLOBALE MÄRKTE (USA/XETRA/BIST) & WELTWIRTSCHAFT 1M-BERICHT"))
               << "╠══════════════════════════════════════════════════════════════════════════════════════════════╣"
               << pal.reset_code << "\n";
-    std::cout << std::format("  Tarih: {}  │  Küresel Rejim Skoru: {:+.2f} ({})\n",
-                             rep.generated_at, rep.global_macro_score, rep.global_regime_title);
-    std::cout << std::format("  ABD Getiri Eğrisi: 3A %{:.2f} │ 10Y %{:.2f} │ 10Y-3M Eğim: {:+.0f} bps\n",
+    std::cout << std::format("  {}: {}  │  {}: {:+.2f} ({})\n",
+                             I18n::tr("Tarih", "Date", "Datum"), rep.generated_at,
+                             I18n::tr("Küresel Rejim Skoru", "Global Regime Score", "Globales Makro-Score"),
+                             rep.global_macro_score, rep.global_regime_title);
+    std::cout << std::format("  {}: {} %{:.2f} │ {} %{:.2f} │ {}: {:+.0f} bps\n",
+                             I18n::tr("ABD Getiri Eğrisi", "US Treasury Curve", "US-Zinskurve"),
+                             I18n::tr("3A", "3M", "3M"),
                              rep.yield_curve.three_month_yield * 100.0,
+                             I18n::tr("10Y", "10Y", "10J"),
                              rep.yield_curve.ten_year_yield * 100.0,
+                             I18n::tr("10Y-3A Eğim", "10Y-3M Slope", "10J-3M Spread"),
                              rep.yield_spread_bps);
     std::cout << "──────────────────────────────────────────────────────────────────────────────────────────────\n";
     for (const auto *r : {&rep.us, &rep.xetra, &rep.bist}) {
       std::cout << std::format(
-          "  {:<28} Spot: {:>9.2f}  │ 20G: {:>+6.2f}% │ 1Ay Hedef: {:>+6.2f}% [{:+.1f}%..{:+.1f}%] │ Med F/K: {:.1f}x\n",
+          "  {:<28} Spot: {:>9.2f}  │ {}: {:>+6.2f}% │ {}: {:>+6.2f}% [{:+.1f}%..{:+.1f}%] │ {}: {:.1f}x\n",
           r->region_code + " (" + r->benchmark_tech.symbol + ")",
-          r->benchmark_tech.spot, r->benchmark_tech.ret_20d_pct,
+          r->benchmark_tech.spot,
+          I18n::tr("20G", "20D", "20T"), r->benchmark_tech.ret_20d_pct,
+          I18n::tr("1Ay Hedef", "1M Target", "1M Ziel"),
           r->benchmark_forecast_1m.expected_return_pct,
           r->benchmark_forecast_1m.bear_return_pct,
           r->benchmark_forecast_1m.bull_return_pct,
+          I18n::tr("Med F/K", "Med P/E", "Med KGV"),
           r->fund_agg.median_pe);
     }
     std::cout << "──────────────────────────────────────────────────────────────────────────────────────────────\n";
     std::cout << pal.green_rgb
-              << std::format("  ✔ PDF Raporu başarıyla oluşturuldu: {}\n", pdf_path)
+              << std::format("  ✔ {}: {}\n",
+                             I18n::tr("PDF Raporu başarıyla oluşturuldu",
+                                      "PDF report successfully generated",
+                                      "PDF-Bericht erfolgreich erstellt"),
+                             pdf_path)
               << pal.reset_code << "\n";
   }
 
@@ -861,6 +885,21 @@ private:
     return kSlateMid;
   }
 
+  static std::string short_dir_(ForecastDirection d) {
+    switch (d) {
+    case ForecastDirection::StrongBullish:
+      return I18n::tr("▲ GÜÇLÜ YUKARI", "▲ STRONG BULL", "▲ STARK BULL");
+    case ForecastDirection::Bullish:
+      return I18n::tr("▲ YUKARI", "▲ BULLISH", "▲ BULLISCH");
+    case ForecastDirection::StrongBearish:
+      return I18n::tr("▼ GÜÇLÜ AŞAĞI", "▼ STRONG BEAR", "▼ STARK BÄR");
+    case ForecastDirection::Bearish:
+      return I18n::tr("▼ AŞAĞI", "▼ BEARISH", "▼ BÄRISCH");
+    default:
+      return I18n::tr("◆ DENGELİ", "◆ NEUTRAL", "◆ NEUTRAL");
+    }
+  }
+
   static void draw_region_kpi_card_(PdfDocument &pdf, double x, double y,
                                     double w, double h,
                                     const RegionDeepReport &r) {
@@ -876,7 +915,8 @@ private:
                               r.benchmark_tech.unit),
                   13.0, true, kSlateDark);
     pdf.draw_text(x + w - 9.0, y + 34.0,
-                  std::format("20G {:+.1f}%", r.benchmark_tech.ret_20d_pct),
+                  std::format("{} {:+.1f}%", I18n::tr("20G", "20D", "20T"),
+                              r.benchmark_tech.ret_20d_pct),
                   8.5, true,
                   r.benchmark_tech.ret_20d_pct >= 0.0 ? kGreen : kRed,
                   PdfAlign::Right);
@@ -909,8 +949,9 @@ private:
                   false, kSlateMuted);
     pdf.draw_text(
         x + w - 9.0, y + 84.0,
-        std::format("F/K {:.1f}x | FD/F {:.1f}x", r.fund_agg.median_pe,
-                    r.fund_agg.median_ev_ebitda),
+        std::format("{} {:.1f}x | {} {:.1f}x",
+                    I18n::tr("F/K", "P/E", "KGV"), r.fund_agg.median_pe,
+                    I18n::tr("FD/F", "EV/EB", "EV/EB"), r.fund_agg.median_ev_ebitda),
         7.5, true, kSlateDark, PdfAlign::Right);
 
     pdf.draw_text(x + 9.0, y + 98.0,
@@ -921,8 +962,9 @@ private:
                     : (r.macro_sent.overall_sentiment_score <= -0.1 ? kRed
                                                                     : kSlateMid);
     pdf.draw_text(x + w - 9.0, y + 98.0,
-                  std::format("{:+.2f} (Şok Veto: {})",
+                  std::format("{:+.2f} ({}: {})",
                               r.macro_sent.overall_sentiment_score,
+                              I18n::tr("Şok Veto", "Shock Veto", "Schock-Veto"),
                               r.fund_agg.neg_shock_count),
                   7.8, true, sc, PdfAlign::Right);
   }
@@ -979,12 +1021,12 @@ private:
                   9.8, true, reg_col);
     pdf.draw_text(
         L + 14.0, 262.0,
-        std::format("{}: 3A %{:.2f}  │  5Y %{:.2f}  │  10Y %{:.2f}  │  30Y %{:.2f}  ({}: {:+.0f} bps)",
+        std::format("{}: {} %{:.2f}  │  {} %{:.2f}  │  {} %{:.2f}  │  {} %{:.2f}  ({}: {:+.0f} bps)",
                     I18n::tr("ABD Hazine Getiri Eğrisi", "US Treasury Curve", "US-Zinskurve"),
-                    rep.yield_curve.three_month_yield * 100.0,
-                    rep.yield_curve.five_year_yield * 100.0,
-                    rep.yield_curve.ten_year_yield * 100.0,
-                    rep.yield_curve.thirty_year_yield * 100.0,
+                    I18n::tr("3A", "3M", "3M"), rep.yield_curve.three_month_yield * 100.0,
+                    I18n::tr("5Y", "5Y", "5J"), rep.yield_curve.five_year_yield * 100.0,
+                    I18n::tr("10Y", "10Y", "10J"), rep.yield_curve.ten_year_yield * 100.0,
+                    I18n::tr("30Y", "30Y", "30J"), rep.yield_curve.thirty_year_yield * 100.0,
                     I18n::tr("10Y-3A Eğim", "10Y-3M Slope", "10J-3M Spread"),
                     rep.yield_spread_bps),
         7.8, false, kSlateMid);
@@ -1008,7 +1050,7 @@ private:
                                         L + 262.0, L + 314.0, L + 412.0};
     pdf.draw_text(cols[0], ty + 14.5, I18n::tr("Değişken", "Variable", "Variable"), 7.8, true, kWhite);
     pdf.draw_text(cols[1], ty + 14.5, I18n::tr("Son Değer", "Spot", "Kurs"), 7.8, true, kWhite);
-    pdf.draw_text(cols[2], ty + 14.5, "5G / 20G %", 7.8, true, kWhite);
+    pdf.draw_text(cols[2], ty + 14.5, I18n::tr("5G / 20G %", "5D / 20D %", "5T / 20T %"), 7.8, true, kWhite);
     pdf.draw_text(cols[3], ty + 14.5, "Vol (%)", 7.8, true, kWhite);
     pdf.draw_text(cols[4], ty + 14.5, I18n::tr("1 Ay Hedef (±1σ)", "1M Target (±1σ)", "1M Ziel"), 7.8, true, kWhite);
     pdf.draw_text(cols[5], ty + 14.5, I18n::tr("Küresel Rolü", "Macro Channel", "Makro-Rolle"), 7.8, true, kWhite);
@@ -1030,11 +1072,13 @@ private:
 
       PdfRgb rcol = (d.tech.ret_20d_pct >= 0.0) ? kGreen : kRed;
       pdf.draw_text(cols[2], ty + 13.0,
-                    std::format("20G {:+.1f}%", d.tech.ret_20d_pct), 7.8, true,
-                    rcol);
+                    std::format("{} {:+.1f}%", I18n::tr("20G", "20D", "20T"),
+                                d.tech.ret_20d_pct),
+                    7.8, true, rcol);
       pdf.draw_text(cols[2], ty + 24.5,
-                    std::format("5G  {:+.1f}%", d.tech.ret_5d_pct), 7.0, false,
-                    kSlateMuted);
+                    std::format("{}  {:+.1f}%", I18n::tr("5G", "5D", "5T"),
+                                d.tech.ret_5d_pct),
+                    7.0, false, kSlateMuted);
 
       pdf.draw_text(cols[3], ty + 18.0,
                     std::format("{:.1f}%", d.tech.ann_vol_pct), 8.0, false,
@@ -1151,17 +1195,21 @@ private:
     pdf.draw_circle(split_x, map_y(s0), 2.3, kGold);
 
     // Legend / Footer inside panel
-    pdf.draw_text(px0, y + h - 18.0, "60G Tarihi", 6.5, false, kSlateMuted);
+    pdf.draw_text(px0, y + h - 18.0,
+                  I18n::tr("60G Tarihi", "60D History", "60T Historie"), 6.5,
+                  false, kSlateMuted);
     pdf.draw_text(px1, y + h - 18.0,
-                  std::format("1Ay {:+.1f}% [{:.0f}..{:.0f}]",
+                  std::format("{} {:+.1f}% [{:.0f}..{:.0f}]",
+                              I18n::tr("1Ay", "1M", "1M"),
                               r.benchmark_forecast_1m.expected_return_pct,
                               r.benchmark_forecast_1m.bear_support,
                               r.benchmark_forecast_1m.bull_target),
                   6.8, true, dir_color_(r.benchmark_forecast_1m.direction),
                   PdfAlign::Right);
     pdf.draw_text(px0, y + h - 8.0,
-                  std::format("Spot: {:.2f} | Conf %{:.0f} | VaR95 {:.1f}%",
-                              s0, r.benchmark_forecast_1m.regime_confidence * 100.0,
+                  std::format("Spot: {:.2f} | {} %{:.0f} | VaR95 {:.1f}%", s0,
+                              I18n::tr("Güven", "Conf", "Konf"),
+                              r.benchmark_forecast_1m.regime_confidence * 100.0,
                               r.benchmark_forecast_1m.var_95_pct),
                   6.5, false, kSlateDark);
   }
@@ -1197,7 +1245,7 @@ private:
       double f1m;
     };
     std::vector<BarItem> bars = {
-        {"ABD SPY", rep.us.benchmark_tech.ret_20d_pct, rep.us.benchmark_forecast_1m.expected_return_pct},
+        {I18n::tr("ABD SPY", "US SPY", "US SPY"), rep.us.benchmark_tech.ret_20d_pct, rep.us.benchmark_forecast_1m.expected_return_pct},
         {"DAX 40", rep.xetra.benchmark_tech.ret_20d_pct, rep.xetra.benchmark_forecast_1m.expected_return_pct},
         {"BIST 100", rep.bist.benchmark_tech.ret_20d_pct, rep.bist.benchmark_forecast_1m.expected_return_pct},
     };
@@ -1328,19 +1376,24 @@ private:
                            "TECHNISCHE ANALYSE & 1M-PROGNOSE"),
                   8.2, true, kBlue);
     double ty = y + 28.0;
+    const std::string lbl_20 = I18n::tr("20G", "20D", "20T");
+    const std::string lbl_5 = I18n::tr("5G", "5D", "5T");
+    const std::string lbl_60 = I18n::tr("60G", "60D", "60T");
+    const std::string lbl_1m = I18n::tr("1Ay", "1M", "1M");
     for (size_t i = 0; i < r.sub_indices_tech.size() && i < 3; ++i) {
       const auto &tk = r.sub_indices_tech[i];
       const auto &fc = r.sub_indices_fc[i];
       pdf.draw_text(
           L + 8.0, ty,
-          std::format("{} | Spot {:.2f} | 20G {:+.1f}% | RSI {:.1f}",
-                      tk.symbol, tk.spot, tk.ret_20d_pct, tk.rsi_14),
+          std::format("{} | Spot {:.2f} | {} {:+.1f}% | RSI {:.1f}",
+                      tk.symbol, tk.spot, lbl_20, tk.ret_20d_pct, tk.rsi_14),
           7.3, true, kNavy);
       pdf.draw_text(
           L + 8.0, ty + 10.5,
-          std::format("SMA20 {:.1f} | SMA50 {:.1f} | Sıkışma {:.2f} | 1Ay {:+.1f}% [{:.1f}..{:.1f}]",
-                      tk.sma_20, tk.sma_50, tk.squeeze_ratio,
-                      fc.expected_return_pct, fc.bear_support, fc.bull_target),
+          std::format("SMA20 {:.1f} | SMA50 {:.1f} | {} {:.2f} | {} {:+.1f}% [{:.1f}..{:.1f}]",
+                      tk.sma_20, tk.sma_50,
+                      I18n::tr("Sıkışma", "Squeeze", "Squeeze"), tk.squeeze_ratio,
+                      lbl_1m, fc.expected_return_pct, fc.bear_support, fc.bull_target),
           6.8, false, dir_color_(fc.direction));
       ty += 25.0;
     }
@@ -1349,13 +1402,15 @@ private:
       const auto &fc = r.benchmark_forecast_1m;
       pdf.draw_text(
           L + 8.0, ty + 2.0,
-          std::format("5G {:+.1f}% | 60G {:+.1f}% | 22G VWAP {:.1f} (Z {:+.2f}) | Vol %{:.1f}",
-                      tk.ret_5d_pct, tk.ret_60d_pct, tk.vwap_22, tk.vwap_z,
+          std::format("{} {:+.1f}% | {} {:+.1f}% | 22{} VWAP {:.1f} (Z {:+.2f}) | Vol %{:.1f}",
+                      lbl_5, tk.ret_5d_pct, lbl_60, tk.ret_60d_pct,
+                      I18n::tr("G", "D", "T"), tk.vwap_22, tk.vwap_z,
                       tk.ann_vol_pct),
           7.0, false, kSlateDark);
       pdf.draw_text(
           L + 8.0, ty + 15.0,
-          std::format("Piyasa Genişliği: VWAP Üstü %{:.0f} | RSI>50 %{:.0f} | VaR95 {:.1f}%",
+          std::format("{}: %{:.0f} | RSI>50 %{:.0f} | VaR95 {:.1f}%",
+                      I18n::tr("VWAP Üstü", "Above VWAP", "Über VWAP"),
                       r.fund_agg.pct_above_vwap, r.fund_agg.pct_rsi_bull,
                       fc.var_95_pct),
           7.0, false, kSlateMid);
@@ -1374,21 +1429,33 @@ private:
                   8.2, true, kGold);
     const auto &fa = r.fund_agg;
     pdf.draw_text(rx + 8.0, y + 30.0,
-                  std::format("Medyan F/K (P/E): {:.1f}x   │   Medyan FD/FAVÖK: {:.1f}x",
-                              fa.median_pe, fa.median_ev_ebitda),
+                  std::format("{}: {:.1f}x   │   {}: {:.1f}x",
+                              I18n::tr("Medyan F/K", "Median P/E", "Median KGV"),
+                              fa.median_pe,
+                              I18n::tr("Medyan FD/FAVÖK", "Median EV/EBITDA", "Median EV/EBITDA"),
+                              fa.median_ev_ebitda),
                   7.5, true, kNavy);
     pdf.draw_text(rx + 8.0, y + 43.0,
-                  std::format("Medyan PD/DD: {:.2f}x   │   Ort. FAVÖK Marjı: %{:.1f}",
-                              fa.median_pb, fa.mean_ebitda_margin_pct),
+                  std::format("{}: {:.2f}x   │   {}: %{:.1f}",
+                              I18n::tr("Medyan PD/DD", "Median P/B", "Median KBV"),
+                              fa.median_pb,
+                              I18n::tr("Ort. FAVÖK Marjı", "Avg EBITDA Mgn", "Ø EBITDA-Marge"),
+                              fa.mean_ebitda_margin_pct),
                   7.3, false, kSlateDark);
     pdf.draw_text(rx + 8.0, y + 56.0,
-                  std::format("Ort. ROE: %{:.1f}   │   Net Borç/FAVÖK: {:.2f}x",
-                              fa.mean_roe_pct, fa.mean_net_debt_ebitda),
+                  std::format("{}: %{:.1f}   │   {}: {:.2f}x",
+                              I18n::tr("Ort. ROE", "Avg ROE", "Ø ROE"),
+                              fa.mean_roe_pct,
+                              I18n::tr("Net Borç/FAVÖK", "Net Debt/EBITDA", "Nettoversch./EBITDA"),
+                              fa.mean_net_debt_ebitda),
                   7.3, false, kSlateDark);
     pdf.draw_text(rx + 8.0, y + 69.0,
-                  std::format("Kalite Dağılımı: {} A+/A  │  {} B  │  {} C  (Time-IC Ort: {:+.3f})",
+                  std::format("{}: {} A+/A  │  {} B  │  {} C  ({}: {:+.3f})",
+                              I18n::tr("Kalite", "Quality", "Qualität"),
                               fa.grade_a_count, fa.grade_b_count,
-                              fa.grade_c_count, fa.mean_time_ic),
+                              fa.grade_c_count,
+                              I18n::tr("Time-IC Ort", "Avg Time-IC", "Ø Time-IC"),
+                              fa.mean_time_ic),
                   7.1, false, kSlateMid);
     pdf.draw_wrapped_text(rx + 8.0, y + 83.5, half_w - 16.0,
                           r.macro_sent.macro_synthesis, 6.7, 8.8, false,
@@ -1399,11 +1466,11 @@ private:
     pdf.fill_rect(L, y, W, 17.0, kSlateDark);
     const std::array<double, 7> tc = {L + 5.0,   L + 64.0,  L + 214.0, L + 276.0,
                                       L + 330.0, L + 388.0, L + 454.0};
-    pdf.draw_text(tc[0], y + 11.5, "Sembol", 7.2, true, kWhite);
+    pdf.draw_text(tc[0], y + 11.5, I18n::tr("Sembol", "Symbol", "Symbol"), 7.2, true, kWhite);
     pdf.draw_text(tc[1], y + 11.5, I18n::tr("Quant Sınıfı", "Quant Class", "Klasse"), 7.2, true, kWhite);
-    pdf.draw_text(tc[2], y + 11.5, "Spot / 20G", 7.2, true, kWhite);
+    pdf.draw_text(tc[2], y + 11.5, std::format("Spot / {}", lbl_20), 7.2, true, kWhite);
     pdf.draw_text(tc[3], y + 11.5, "Net R:R", 7.2, true, kWhite);
-    pdf.draw_text(tc[4], y + 11.5, "FD/FAVÖK", 7.2, true, kWhite);
+    pdf.draw_text(tc[4], y + 11.5, I18n::tr("FD/FAVÖK", "EV/EBITDA", "EV/EBITDA"), 7.2, true, kWhite);
     pdf.draw_text(tc[5], y + 11.5, "Sticky Sent", 7.2, true, kWhite);
     pdf.draw_text(tc[6], y + 11.5, "Time-IC", 7.2, true, kWhite);
     y += 17.0;
@@ -1453,7 +1520,8 @@ private:
                           std::isfinite(c->fundamentals.ev_to_ebitda))
                              ? std::format("{:.1f}x ({})", c->fundamentals.ev_to_ebitda,
                                            c->fundamentals.quality_grade)
-                             : std::format("F/K {:.1f}x",
+                             : std::format("{} {:.1f}x",
+                                           I18n::tr("F/K", "P/E", "KGV"),
                                            std::isfinite(c->fundamentals.pe_ratio)
                                                ? c->fundamentals.pe_ratio
                                                : 0.0);
@@ -1464,8 +1532,8 @@ private:
       pdf.draw_text(tc[5], y + 11.8,
                     c->has_live_news
                         ? std::format("{:+.2f}{}", c->sticky_sentiment_score,
-                                      is_shock ? " [ŞOK]" : "")
-                        : "Nötr",
+                                      is_shock ? I18n::tr(" [ŞOK]", " [SHOCK]", " [SCHOCK]") : "")
+                        : I18n::tr("Nötr", "Neutral", "Neutral"),
                     6.8, is_shock, scol);
       pdf.draw_text(tc[6], y + 11.8,
                     std::format("{:+.3f} (%{:.0f})", c->predictability_ic,
@@ -1482,20 +1550,24 @@ private:
     constexpr double W = PdfDocument::kA4Width - 2.0 * L;
 
     render_region_deep_block_(
-        pdf, L, 48.0, W, rep.us, "[ABD / US]",
-        std::format("1 Ay Hedef Bandı: {:.2f} - {:.2f} $ │ Güven: %{:.0f} │ {}",
+        pdf, L, 48.0, W, rep.us, I18n::tr("[ABD / US]", "[US / WALL ST]", "[USA / WALL ST]"),
+        std::format("{}: {:.2f} - {:.2f} $ │ {}: %{:.0f} │ {}",
+                    I18n::tr("1 Ay Hedef Bandı", "1M Target Range", "1M-Zielband"),
                     rep.us.benchmark_forecast_1m.bear_support,
                     rep.us.benchmark_forecast_1m.bull_target,
+                    I18n::tr("Güven", "Conf", "Konf"),
                     rep.us.benchmark_forecast_1m.regime_confidence * 100.0,
-                    rep.us.benchmark_forecast_1m.direction_label));
+                    short_dir_(rep.us.benchmark_forecast_1m.direction)));
 
     render_region_deep_block_(
-        pdf, L, 412.0, W, rep.xetra, "[ALMANYA / XETRA]",
-        std::format("1 Ay DAX Hedef Bandı: {:.0f} - {:.0f} pt │ Güven: %{:.0f} │ {}",
+        pdf, L, 412.0, W, rep.xetra, I18n::tr("[ALMANYA / XETRA]", "[GERMANY / XETRA]", "[DEUTSCHLAND / XETRA]"),
+        std::format("{}: {:.0f} - {:.0f} pt │ {}: %{:.0f} │ {}",
+                    I18n::tr("1 Ay DAX Hedef Bandı", "1M DAX Target Range", "1M-DAX-Zielband"),
                     rep.xetra.benchmark_forecast_1m.bear_support,
                     rep.xetra.benchmark_forecast_1m.bull_target,
+                    I18n::tr("Güven", "Conf", "Konf"),
                     rep.xetra.benchmark_forecast_1m.regime_confidence * 100.0,
-                    rep.xetra.benchmark_forecast_1m.direction_label));
+                    short_dir_(rep.xetra.benchmark_forecast_1m.direction)));
   }
 
   static void render_page4_bist_and_synthesis_(PdfDocument &pdf,
@@ -1505,13 +1577,18 @@ private:
 
     const auto *d_usdtry = find_driver_(rep, "TRY=X");
     std::string bist_fx_note = std::format(
-        "USD Bazlı BIST 100: 20G {:+.1f}% │ 60G {:+.1f}% │ USD/TRY {:.2f} (1Ay Hedef {:.2f})",
-        rep.bist_usd_ret20d_pct, rep.bist_usd_ret60d_pct,
+        "{}: {} {:+.1f}% │ {} {:+.1f}% │ USD/TRY {:.2f} ({} {:.2f})",
+        I18n::tr("USD Bazlı BIST 100", "BIST 100 in USD", "BIST 100 in USD"),
+        I18n::tr("20G", "20D", "20T"), rep.bist_usd_ret20d_pct,
+        I18n::tr("60G", "60D", "60T"), rep.bist_usd_ret60d_pct,
         d_usdtry ? d_usdtry->tech.spot : 0.0,
+        I18n::tr("1Ay Hedef", "1M Target", "1M-Ziel"),
         d_usdtry ? d_usdtry->forecast_1m.target_price : 0.0);
 
-    render_region_deep_block_(pdf, L, 48.0, W, rep.bist, "[TÜRKİYE / BIST]",
-                              bist_fx_note);
+    render_region_deep_block_(
+        pdf, L, 48.0, W, rep.bist,
+        I18n::tr("[TÜRKİYE / BIST]", "[TURKEY / BIST]", "[TÜRKEI / BIST]"),
+        bist_fx_note);
 
     // Olay Şoku / Sürü Riski & 1 Aylık Karşılaştırmalı Stratejik Özet
     double y = 346.0;
@@ -1553,15 +1630,16 @@ private:
       double box_h = 14.0 + static_cast<double>(show_n) * 19.5;
       pdf.fill_and_stroke_rect(L, y, W, box_h, kRedBg, kRed, 0.7);
       double sy = y + 13.0;
+      const std::string spot_sent_lbl = I18n::tr("Anlık", "Spot", "Aktuell");
       for (size_t i = 0; i < show_n; ++i) {
         const auto *s = shocks[i];
         bool bold_row = (i < 3);
         pdf.draw_text(
             L + 10.0, sy,
             pdf.fit_text(
-                std::format("! {} ({}): Sticky {:+.2f} │ Anlık {:+.2f} │ {}",
+                std::format("! {} ({}): Sticky {:+.2f} │ {} {:+.2f} │ {}",
                             s->symbol, s->market, s->sticky_sentiment_score,
-                            s->sentiment_score, s->quant_diagnosis),
+                            spot_sent_lbl, s->sentiment_score, s->quant_diagnosis),
                 W - 20.0, 7.1, bold_row),
             7.1, bold_row, kRed);
         sy += 19.5;
@@ -1581,28 +1659,13 @@ private:
     pdf.fill_rect(L, y, W, 20.0, kNavy);
     const std::array<double, 6> sc = {L + 6.0,   L + 118.0, L + 186.0,
                                       L + 278.0, L + 362.0, L + 448.0};
-    pdf.draw_text(sc[0], y + 13.5, "Piyasa / Endeks", 7.4, true, kWhite);
-    pdf.draw_text(sc[1], y + 13.5, "1Ay Beklenen", 7.4, true, kWhite);
-    pdf.draw_text(sc[2], y + 13.5, "±1σ Hedef Bandı", 7.4, true, kWhite);
+    pdf.draw_text(sc[0], y + 13.5, I18n::tr("Piyasa / Endeks", "Market / Index", "Markt / Index"), 7.4, true, kWhite);
+    pdf.draw_text(sc[1], y + 13.5, I18n::tr("1Ay Beklenen", "1M Expected", "1M Erwartet"), 7.4, true, kWhite);
+    pdf.draw_text(sc[2], y + 13.5, I18n::tr("±1σ Hedef Bandı", "±1σ Target Band", "±1σ Zielband"), 7.4, true, kWhite);
     pdf.draw_text(sc[3], y + 13.5, "95% VaR / CVaR", 7.4, true, kWhite);
-    pdf.draw_text(sc[4], y + 13.5, "Med F/K | FD/FAV", 7.4, true, kWhite);
-    pdf.draw_text(sc[5], y + 13.5, "Yön Sinyali", 7.4, true, kWhite);
+    pdf.draw_text(sc[4], y + 13.5, I18n::tr("Med F/K | FD/FAV", "Med P/E | EV/EB", "Med KGV | EV/EB"), 7.4, true, kWhite);
+    pdf.draw_text(sc[5], y + 13.5, I18n::tr("Yön Sinyali", "Direction", "Richtung"), 7.4, true, kWhite);
     y += 20.0;
-
-    auto short_dir = [](ForecastDirection d) -> std::string {
-      switch (d) {
-      case ForecastDirection::StrongBullish:
-        return I18n::tr("▲ GÜÇLÜ YUKARI", "▲ STRONG BULL", "▲ STARK BULL");
-      case ForecastDirection::Bullish:
-        return I18n::tr("▲ YUKARI", "▲ BULLISH", "▲ BULLISCH");
-      case ForecastDirection::StrongBearish:
-        return I18n::tr("▼ GÜÇLÜ AŞAĞI", "▼ STRONG BEAR", "▼ STARK BÄR");
-      case ForecastDirection::Bearish:
-        return I18n::tr("▼ AŞAĞI", "▼ BEARISH", "▼ BÄRISCH");
-      default:
-        return I18n::tr("◆ DENGELİ", "◆ NEUTRAL", "◆ NEUTRAL");
-      }
-    };
 
     for (size_t i = 0; i < 3; ++i) {
       const auto *r = (i == 0) ? &rep.us : ((i == 1) ? &rep.xetra : &rep.bist);
@@ -1625,7 +1688,7 @@ private:
                     std::format("{:.1f}x | {:.1f}x", r->fund_agg.median_pe,
                                 r->fund_agg.median_ev_ebitda),
                     7.2, false, kSlateDark);
-      pdf.draw_text(sc[5], y + 15.0, short_dir(fc.direction), 7.0, true,
+      pdf.draw_text(sc[5], y + 15.0, short_dir_(fc.direction), 7.0, true,
                     dir_color_(fc.direction));
       y += 24.0;
     }
